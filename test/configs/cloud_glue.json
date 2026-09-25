@@ -30,13 +30,6 @@
 	],
 	"skip_tests": [
 		{
-			"reason": "glue_repair_table (MSCK REPAIR TABLE) is not implemented yet",
-			"paths": [
-				"test/sql/hive/ddl/alter_partition/glue_repair_table.test",
-				"test/sql/hive/ddl/alter_partition/test_show_partitions.test"
-			]
-		},
-		{
 			"reason": "needs the fixture tables that scripts/docker-compose.yml creates in the local Glue",
 			"paths": [
 				"test/sql/hive/dml/insert/insert_into_bucketed_table.test",

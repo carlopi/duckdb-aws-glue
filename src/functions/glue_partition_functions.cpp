@@ -3,7 +3,10 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/map.hpp"
 #include "duckdb/common/optional.hpp"
+#include "duckdb/common/set.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
@@ -11,10 +14,13 @@
 #include "duckdb/main/query_result.hpp"
 
 #include "api/glue_api.hpp"
+#include "api/glue_api_util.hpp"
 #include "core/glue_types.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "catalog/glue_schema_entry.hpp"
+#include "planning/hive_multi_file_reader.hpp"
+#include "planning/hive_query_cache.hpp"
 #include "duckdb/transaction/transaction.hpp"
 
 namespace duckdb {
@@ -1003,6 +1009,168 @@ void GlueGetPartitionResponseScan(ClientContext &context, TableFunctionInput &da
 	output.CheckCardinality(1);
 }
 
+//===--------------------------------------------------------------------===//
+// glue_repair_table
+//===--------------------------------------------------------------------===//
+struct GlueRepairTableBindData : public TableFunctionData {
+	GluePartitionTarget target;
+	vector<LogicalType> key_types;
+	string root;
+
+	//! The partitions are created from the table definition fetched at bind, so a prepared statement binds every time
+	bool SupportStatementCache() const override {
+		return false;
+	}
+};
+
+struct GlueRepairTableState : public GlobalTableFunctionState {
+	vector<GluePartitionInput> added;
+	idx_t offset = 0;
+	bool applied = false;
+};
+
+unique_ptr<FunctionData> GlueRepairTableBind(ClientContext &context, TableFunctionBindInput &input,
+                                             vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = make_uniq<GlueRepairTableBindData>();
+	result->target = ResolveGlueTable(context, "glue_repair_table", input.inputs[0]);
+	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_repair_table");
+	result->root = result->target.table.location;
+	StringUtil::RTrim(result->root, "/");
+	if (result->root.empty()) {
+		throw InvalidInputException("Table '%s' has no location in Glue", result->target.TableName());
+	}
+	for (auto &key : result->target.table.partition_keys) {
+		auto type = GlueTypes::ToLogicalType(key.type);
+		result->key_types.push_back(type);
+		names.emplace_back(key.name);
+		return_types.push_back(type);
+	}
+	names.emplace_back("location");
+	auto deduplicated = names;
+	QueryResult::DeduplicateColumns(deduplicated);
+	names.back() = deduplicated.back();
+	return_types.emplace_back(LogicalType::VARCHAR);
+	return std::move(result);
+}
+
+unique_ptr<GlobalTableFunctionState> GlueRepairTableInit(ClientContext &context, TableFunctionInitInput &input) {
+	return make_uniq<GlueRepairTableState>();
+}
+
+//! 'dt=2024-01-01/country=US/part' -> values [2024-01-01, US], partition_directory 'dt=2024-01-01/country=US'
+bool ReadDiscoveredPartition(ClientContext &context, const GlueRepairTableBindData &bind_data,
+                             const string &relative_directory, vector<string> &values, string &partition_directory) {
+	auto &keys = bind_data.target.table.partition_keys;
+	auto components = StringUtil::Split(relative_directory, '/');
+	if (components.size() < keys.size()) {
+		return false;
+	}
+	values.clear();
+	partition_directory.clear();
+	for (idx_t k = 0; k < keys.size(); k++) {
+		auto &component = components[k];
+		auto equals = component.find('=');
+		if (equals == string::npos) {
+			return false;
+		}
+		try {
+			if (!StringUtil::CIEquals(HivePartitioning::Unescape(component.substr(0, equals)), keys[k].name)) {
+				return false;
+			}
+			auto value = HivePartitioning::Unescape(component.substr(equals + 1));
+			auto typed = GlueTypes::PartitionValue(context, keys[k].name, value, bind_data.key_types[k]);
+			// stored as glue_add_partition stores it: year=07 -> '7'
+			values.push_back(typed.IsNull() ? value : typed.ToString());
+		} catch (std::exception &) {
+			// not UTF-8 once unescaped, or not a value of the key's type
+			return false;
+		}
+		if (k > 0) {
+			partition_directory += "/";
+		}
+		partition_directory += component;
+	}
+	return true;
+}
+
+void GlueRepairTableApply(ClientContext &context, TableFunctionInput &data, GlueRepairTableState &state) {
+	auto &bind_data = data.bind_data->Cast<GlueRepairTableBindData>();
+	auto &catalog = *bind_data.target.catalog;
+	auto &table = bind_data.target.table;
+	CheckWritable(catalog, "BatchCreatePartition");
+
+	set<vector<string>> existing_values;
+	unordered_set<string> existing_locations;
+	for (auto &partition : GlueAPI::GetPartitions(context, catalog, table.schema_name, table.name)) {
+		existing_values.insert(partition.values);
+		auto location = partition.location;
+		StringUtil::RTrim(location, "/");
+		existing_locations.insert(std::move(location));
+	}
+
+	auto root_prefix = bind_data.root + "/";
+	// listed like a scan, but never from glue_cache_listings: a cached listing misses files added after it
+	auto files = HiveQueryCache::Get(context)->GetDirectoryListing(context, bind_data.root)->GetAllFiles();
+	unordered_set<string> seen_directories;
+	// values -> location: the first directory found for the values wins
+	map<vector<string>, string> discovered;
+	for (auto &file : files) {
+		if (!IsDataFile(file, root_prefix)) {
+			continue;
+		}
+		auto separator = file.path.find_last_of('/');
+		if (separator == string::npos || separator < root_prefix.size()) {
+			continue;
+		}
+		auto directory = file.path.substr(0, separator);
+		if (!seen_directories.insert(directory).second) {
+			continue;
+		}
+		auto relative = directory.substr(root_prefix.size());
+		vector<string> values;
+		string partition_directory;
+		if (!ReadDiscoveredPartition(context, bind_data, relative, values, partition_directory)) {
+			continue;
+		}
+		auto location = root_prefix + partition_directory;
+		if (existing_values.count(values) || existing_locations.count(location)) {
+			continue;
+		}
+		discovered.emplace(std::move(values), std::move(location));
+	}
+
+	for (auto &entry : discovered) {
+		GluePartitionInput partition;
+		partition.values = entry.first;
+		partition.location = entry.second;
+		state.added.push_back(std::move(partition));
+	}
+	if (state.added.empty()) {
+		return;
+	}
+	GlueAPI::BatchCreatePartitions(context, catalog, table, state.added);
+}
+
+void GlueRepairTableScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &bind_data = data.bind_data->Cast<GlueRepairTableBindData>();
+	auto &state = data.global_state->Cast<GlueRepairTableState>();
+	if (!state.applied) {
+		state.applied = true;
+		GlueRepairTableApply(context, data, state);
+	}
+	auto &keys = bind_data.target.table.partition_keys;
+	idx_t count = 0;
+	while (state.offset < state.added.size() && count < STANDARD_VECTOR_SIZE) {
+		auto &partition = state.added[state.offset++];
+		for (idx_t k = 0; k < keys.size(); k++) {
+			output.data[k].Append(
+			    PartitionListingValue(context, keys[k].name, partition.values[k], bind_data.key_types[k]));
+		}
+		output.data[keys.size()].Append(Value(partition.location));
+		count++;
+	}
+}
+
 } // namespace
 
 TableFunction GetGlueGetPartitionResponseFunction() {
@@ -1067,6 +1235,12 @@ TableFunction GetGlueReplaceColumnsFunction() {
 TableFunction GetGlueAlterTableFunction() {
 	TableFunction function("glue_alter_table", {LogicalType::VARCHAR, LogicalType::ANY}, GlueAlterTableScan,
 	                       GlueAlterTableBind, GlueAlterTableInit);
+	return function;
+}
+
+TableFunction GetGlueRepairTableFunction() {
+	TableFunction function("glue_repair_table", {LogicalType::VARCHAR}, GlueRepairTableScan, GlueRepairTableBind,
+	                       GlueRepairTableInit);
 	return function;
 }
 
