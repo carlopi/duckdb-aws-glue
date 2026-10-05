@@ -10,10 +10,8 @@
 #include "catalog/glue_attach.hpp"
 #include "functions/glue_functions.hpp"
 #include "grammar/glue_grammar.hpp"
-#include "api/glue_http_client.hpp"
 #include "duckdb/main/extension_helper.hpp"
 
-#include <aws/core/Aws.h>
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_transaction_manager.hpp"
 
@@ -33,24 +31,9 @@ public:
 	}
 };
 
-static void InitAWSAPI() {
-	static bool loaded = false;
-	if (!loaded) {
-		Aws::SDKOptions options;
-		Aws::InitAPI(options); // Should only be called once.
-		loaded = true;
-	}
-}
-
 static void LoadInternal(ExtensionLoader &loader) {
 	auto &instance = loader.GetDatabaseInstance();
 	auto &config = DBConfig::GetConfig(instance);
-
-	config.AddExtensionOption("glue_network_calls_via_duckdb",
-	                          "Route the Glue API calls of the AWS SDK through DuckDB's HTTP layer (httpfs) instead "
-	                          "of the AWS SDK's own HTTP client, so they use DuckDB's proxy / certificate settings "
-	                          "and show up in the HTTP log. Default true.",
-	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
 	config.AddExtensionOption("glue_get_partitions_segments",
 	                          "How many GetPartitions requests to run at the same time when listing the partitions of "
@@ -70,10 +53,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "When a scan reads at least this many partitions below the table location, the location "
 	                          "is listed once (recursively) instead of one listing per partition. Default 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(10));
-
-	// The HTTP client factory has to be in place before the first AWS client is constructed
-	InitAWSAPI();
-	RegisterGlueHttpClientFactory(instance);
 
 	// Hive tables are read with read_parquet
 	ExtensionHelper::AutoLoadExtension(instance, "parquet");

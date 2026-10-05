@@ -1,142 +1,109 @@
 #include "api/glue_api_util.hpp"
-#include "api/glue_http_client.hpp"
 
 #include "duckdb/common/string_util.hpp"
-
-#include <aws/core/utils/json/JsonSerializer.h>
-#include <aws/glue/model/CreateDatabaseRequest.h>
-#include <aws/glue/model/DeleteDatabaseRequest.h>
-#include <aws/glue/model/GetDatabaseRequest.h>
-#include <aws/glue/model/GetDatabasesRequest.h>
-#include <aws/glue/model/UpdateDatabaseRequest.h>
 
 namespace duckdb {
 
 vector<GlueDatabaseInfo> GlueAPI::GetDatabases(ClientContext &context, GlueCatalog &catalog) {
-	GlueHttpClientContextScope http_scope(context);
-	auto client = GetClient(context, catalog);
 	vector<GlueDatabaseInfo> result;
-	Aws::String next_token;
+	string next_token;
 	do {
-		Aws::Glue::Model::GetDatabasesRequest request;
-		SetCatalogId(request, catalog);
+		GlueRequest request(catalog);
 		if (!next_token.empty()) {
-			request.SetNextToken(next_token);
+			request.SetString(request.Root(), "NextToken", next_token);
 		}
-		auto outcome = client->GetDatabases(request);
-		if (!outcome.IsSuccess()) {
-			ThrowGlueError(outcome, "GetDatabases");
+		auto response = Call(context, catalog, "GetDatabases", request);
+		if (!response.IsSuccess()) {
+			response.Throw("GetDatabases");
 		}
-		auto &databases = outcome.GetResult();
-		for (auto &database : databases.GetDatabaseList()) {
+		for (auto database : GlueJsonElements(response.Get("DatabaseList"))) {
 			result.push_back(ToDatabaseInfo(database));
 		}
-		next_token = databases.GetNextToken();
+		next_token = response.GetString("NextToken");
 	} while (!next_token.empty());
 	return result;
 }
 
 bool GlueAPI::GetDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                           GlueDatabaseInfo &result, string *raw_json) {
-	GlueHttpClientContextScope http_scope(context);
-	auto client = GetClient(context, catalog);
-	Aws::Glue::Model::GetDatabaseRequest request;
-	SetCatalogId(request, catalog);
-	request.SetName(database_name);
-	auto outcome = client->GetDatabase(request);
-	if (!outcome.IsSuccess()) {
-		if (IsEntityNotFound(outcome)) {
+	GlueRequest request(catalog);
+	request.SetString(request.Root(), "Name", database_name);
+	auto response = Call(context, catalog, "GetDatabase", request);
+	if (!response.IsSuccess()) {
+		if (response.IsEntityNotFound()) {
 			return false;
 		}
-		ThrowGlueError(outcome, StringUtil::Format("GetDatabase '%s'", database_name));
+		response.Throw(StringUtil::Format("GetDatabase '%s'", database_name));
 	}
-	auto &database = outcome.GetResult().GetDatabase();
+	auto database = response.Get("Database");
 	result = ToDatabaseInfo(database);
 	if (raw_json) {
-		*raw_json = ToStdString(database.Jsonize().View().WriteReadable());
+		*raw_json = GlueJsonToString(database);
 	}
 	return true;
 }
 
 void GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database) {
 	CheckWritable(catalog, "CreateDatabase");
-	GlueHttpClientContextScope http_scope(context);
-	auto client = GetClient(context, catalog);
-	Aws::Glue::Model::DatabaseInput input;
-	input.SetName(database.name);
+	GlueRequest request(catalog);
+	auto input = request.SetObject(request.Root(), "DatabaseInput");
+	request.SetString(input, "Name", database.name);
 	if (!database.description.empty()) {
-		input.SetDescription(database.description);
+		request.SetString(input, "Description", database.description);
 	}
 	if (!database.location_uri.empty()) {
-		input.SetLocationUri(database.location_uri);
+		request.SetString(input, "LocationUri", database.location_uri);
 	}
 	if (!database.parameters.empty()) {
-		input.SetParameters(ToAwsMap(database.parameters));
+		request.SetMap(input, "Parameters", database.parameters);
 	}
-	Aws::Glue::Model::CreateDatabaseRequest request;
-	SetCatalogId(request, catalog);
-	request.SetDatabaseInput(input);
-	auto outcome = client->CreateDatabase(request);
-	if (!outcome.IsSuccess()) {
-		if (IsAlreadyExists(outcome)) {
+	auto response = Call(context, catalog, "CreateDatabase", request);
+	if (!response.IsSuccess()) {
+		if (response.IsAlreadyExists()) {
 			throw CatalogException("Glue database with name \"%s\" already exists", database.name);
 		}
-		ThrowGlueError(outcome, StringUtil::Format("CreateDatabase '%s'", database.name));
+		response.Throw(StringUtil::Format("CreateDatabase '%s'", database.name));
 	}
 }
 
 void GlueAPI::UpdateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database) {
-	GlueHttpClientContextScope http_scope(context);
-	auto client = GetClient(context, catalog);
-	Aws::Glue::Model::GetDatabaseRequest get_request;
-	SetCatalogId(get_request, catalog);
-	get_request.SetName(database.name);
-	auto get_outcome = client->GetDatabase(get_request);
-	if (!get_outcome.IsSuccess()) {
-		if (IsEntityNotFound(get_outcome)) {
+	GlueRequest get_request(catalog);
+	get_request.SetString(get_request.Root(), "Name", database.name);
+	auto get_response = Call(context, catalog, "GetDatabase", get_request);
+	if (!get_response.IsSuccess()) {
+		if (get_response.IsEntityNotFound()) {
 			throw CatalogException("Glue database with name \"%s\" does not exist", database.name);
 		}
-		ThrowGlueError(get_outcome, StringUtil::Format("GetDatabase '%s'", database.name));
+		get_response.Throw(StringUtil::Format("GetDatabase '%s'", database.name));
 	}
 	// UpdateDatabase replaces the whole definition: carry over what is not changed here
-	auto &current = get_outcome.GetResult().GetDatabase();
-	Aws::Glue::Model::DatabaseInput input;
-	input.SetName(database.name);
-	input.SetDescription(database.description);
-	input.SetLocationUri(database.location_uri);
-	input.SetParameters(ToAwsMap(database.parameters));
-	if (current.CreateTableDefaultPermissionsHasBeenSet()) {
-		input.SetCreateTableDefaultPermissions(current.GetCreateTableDefaultPermissions());
+	auto current = get_response.Get("Database");
+	GlueRequest request(catalog);
+	request.SetString(request.Root(), "Name", database.name);
+	auto input = request.SetObject(request.Root(), "DatabaseInput");
+	request.SetString(input, "Name", database.name);
+	request.SetString(input, "Description", database.description);
+	request.SetString(input, "LocationUri", database.location_uri);
+	request.SetMap(input, "Parameters", database.parameters);
+	for (auto key : {"CreateTableDefaultPermissions", "TargetDatabase", "FederatedDatabase"}) {
+		request.Copy(input, key, GlueJsonGet(current, key));
 	}
-	if (current.TargetDatabaseHasBeenSet()) {
-		input.SetTargetDatabase(current.GetTargetDatabase());
-	}
-	if (current.FederatedDatabaseHasBeenSet()) {
-		input.SetFederatedDatabase(current.GetFederatedDatabase());
-	}
-	Aws::Glue::Model::UpdateDatabaseRequest request;
-	SetCatalogId(request, catalog);
-	request.SetName(database.name);
-	request.SetDatabaseInput(input);
-	auto outcome = client->UpdateDatabase(request);
-	if (!outcome.IsSuccess()) {
-		ThrowGlueError(outcome, StringUtil::Format("UpdateDatabase '%s'", database.name));
+	auto response = Call(context, catalog, "UpdateDatabase", request);
+	if (!response.IsSuccess()) {
+		response.Throw(StringUtil::Format("UpdateDatabase '%s'", database.name));
 	}
 }
 
 void GlueAPI::DeleteDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name) {
 	CheckWritable(catalog, "DeleteDatabase");
-	GlueHttpClientContextScope http_scope(context);
-	auto client = GetClient(context, catalog);
-	Aws::Glue::Model::DeleteDatabaseRequest request;
-	SetCatalogId(request, catalog);
-	request.SetName(database_name);
-	auto outcome = client->DeleteDatabase(request);
-	if (!outcome.IsSuccess()) {
-		if (IsEntityNotFound(outcome)) {
+	GlueRequest request(catalog);
+	request.SetString(request.Root(), "Name", database_name);
+	auto response = Call(context, catalog, "DeleteDatabase", request);
+	if (!response.IsSuccess()) {
+		if (response.IsEntityNotFound()) {
 			throw CatalogException("Glue database with name \"%s\" does not exist", database_name);
 		}
-		ThrowGlueError(outcome, StringUtil::Format("DeleteDatabase '%s'", database_name));
+		response.Throw(StringUtil::Format("DeleteDatabase '%s'", database_name));
 	}
 }
 

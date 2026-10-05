@@ -4,19 +4,13 @@
 
 #include "duckdb/common/pair.hpp"
 
-#include <memory>
-
-namespace Aws {
-namespace Glue {
-class GlueClient;
-} // namespace Glue
-} // namespace Aws
-
 namespace duckdb {
 class ClientContext;
 class GlueCatalog;
+class GlueRequest;
+class GlueResponse;
 
-//! Thin wrapper around the AWS SDK Glue client
+//! The calls to the Glue Data Catalog API
 class GlueAPI {
 public:
 	//! Verify that the catalog can be reached with the configured credentials
@@ -91,9 +85,10 @@ public:
 	static void DeleteTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                        const string &table_name);
 
-private:
-	//! Get (or create) the Glue client for the catalog, using the credentials of the configured DuckDB secret
-	static std::shared_ptr<Aws::Glue::GlueClient> GetClient(ClientContext &context, GlueCatalog &catalog);
+	//! Send 'request' as Glue API operation 'operation' (e.g. "GetTable"), signed with the credentials of the
+	//! configured DuckDB secret. An error returned by Glue is reported in the response, not thrown.
+	static GlueResponse Call(ClientContext &context, const GlueCatalog &catalog, const string &operation,
+	                         const GlueRequest &request);
 };
 
 } // namespace duckdb

@@ -9,14 +9,6 @@
 #include "catalog/glue_options.hpp"
 #include "catalog/glue_schema_set.hpp"
 
-#include <memory>
-
-namespace Aws {
-namespace Glue {
-class GlueClient;
-} // namespace Glue
-} // namespace Aws
-
 namespace duckdb {
 class GlueTable;
 
@@ -89,11 +81,6 @@ public:
 public:
 	AccessMode access_mode;
 	GlueAttachOptions options;
-
-	//! The cached Glue client (managed by GlueAPI): rebuilt whenever the credentials it was built with change
-	mutex client_lock;
-	string client_cache_key;
-	std::shared_ptr<Aws::Glue::GlueClient> glue_client;
 
 private:
 	//! Throw unless 'table' is a Hive table, the only kind that can be written

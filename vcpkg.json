@@ -5,19 +5,7 @@
 		"zlib",
 		"snappy",
 		"liblzma",
-		"jansson",
-		{
-			"name": "aws-sdk-cpp",
-			"features": [
-				"glue",
-				"sso",
-				"sts",
-				"identity-management",
-				"rds",
-				"redshift",
-				"cloudformation"
-			]
-		}
+		"jansson"
 	],
 	"vcpkg-configuration": {
 		"overlay-ports": [

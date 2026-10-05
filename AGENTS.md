@@ -6,7 +6,7 @@ This file provides guidance to coding agents when working with code in this repo
 ## What this is
 
 A DuckDB extension (`glue`, attached with `ATTACH '<account_id>' AS cat (TYPE GLUE)`) that exposes an AWS Glue Data
-Catalog as a DuckDB catalog through the AWS SDK Glue client. Only Hive (Glue native) tables are readable/writable
+Catalog as a DuckDB catalog through the Glue JSON API (no AWS SDK). Only Hive (Glue native) tables are readable/writable
 (parquet, csv, json, avro SerDes); Iceberg/Delta/Hudi tables are listed (`duckdb_tables().tags['table_type']`) but
 scans and DML throw. The top-level `README.md` is empty — `docs/README.md` is the real user-facing spec (attach
 options, read/write semantics, partition functions, testing, benchmarks). Keep it in sync when behavior changes.
@@ -71,19 +71,20 @@ Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
 
 ## Architecture
 
-- **Entry point** `src/glue_extension.cpp`: `Aws::InitAPI`, registers the `glue` StorageExtension, the table functions,
-  the `glue_hive_ddl` grammar extension, and settings (`glue_network_calls_via_duckdb`, `glue_get_partitions_segments`,
+- **Entry point** `src/glue_extension.cpp`: registers the `glue` StorageExtension, the table functions,
+  the `glue_hive_ddl` grammar extension, and settings (`glue_get_partitions_segments`,
   `hive_partition_listing_threshold`).
 - **Catalog layer** `src/catalog/`: the usual DuckDB custom-catalog shape — `GlueCatalog` → `GlueSchemaSet` →
   `GlueSchemaEntry` (a Glue database) → `GlueTableSet` → `GlueTable`. `GlueAttach` parses ATTACH options. DDL
   (CREATE/DROP schema/table, ALTER column) is implemented in `GlueSchemaEntry`; Glue types are mapped in
   `src/core/glue_types.cpp`. Listing skips tables whose definition can't be converted (logged), direct lookup throws.
 - **All Glue calls** go through static methods on `GlueAPI` (`src/api/`, one file per resource: databases, tables,
-  partitions), which convert between SDK objects and plain structs (`GlueTableInfo`, `GluePartitionInfo`, ...). Updates
-  copy the full `Table` into a `TableInput` because Glue's UpdateTable replaces the whole definition.
-- **HTTP transport** `src/api/glue_http_client.cpp`: a global AWS `HttpClientFactory` sends SDK traffic through DuckDB's
-  `HTTPUtil` (so it's logged and honors DuckDB proxy settings). The calling `ClientContext` reaches it via a
-  thread_local scope (`GlueHttpClientContextScope`) set around each `GlueAPI` call.
+  partitions), which build the JSON request (`GlueRequest`) and convert the JSON response to plain structs
+  (`GlueTableInfo`, `GluePartitionInfo`, ...). Updates copy the full `Table` of the response into a `TableInput`
+  because Glue's UpdateTable replaces the whole definition.
+- **HTTP transport** `src/api/glue_client.cpp`: `GlueAPI::Call` signs the request (SigV4, with
+  `HTTPUtil::CreateSignatureV4`) using the credentials of the DuckDB secret and POSTs it through DuckDB's `HTTPUtil`
+  (httpfs), so it's logged and honors DuckDB proxy settings. Throttled requests are retried.
 - **Reading** `src/planning/hive_multi_file_reader.cpp`: `GlueTable::GetScanFunction` builds a `HiveScanInfo` (Glue
   schema, partitions from `GetPartitions`, format) and scans with the format's reader
   (`read_parquet`/`read_csv`/`read_json`/ `read_avro`) using `HiveMultiFileReader` + a lazy `HiveMultiFileList`:
