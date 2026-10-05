@@ -5,7 +5,18 @@
 		"zlib",
 		"snappy",
 		"liblzma",
-		"jansson"
+		"jansson",
+               {
+                       "name": "aws-sdk-cpp",
+                       "features": [
+                               "sso",
+                               "sts",
+                               "identity-management",
+                               "rds",
+                               "redshift",
+                               "cloudformation"
+                       ]
+               }
 	],
 	"vcpkg-configuration": {
 		"overlay-ports": [
