@@ -575,12 +575,9 @@ void SetHiveScanSerialization(TableFunction &function) {
 	function.SetDeserializeCallback(HiveScanDeserialize);
 }
 
-static BindInfo GlueHiveBindInfo(const optional_ptr<FunctionData> bind_data) {
+static optional_ptr<TableCatalogEntry> GlueHiveGetTableEntry(optional_ptr<const FunctionData> bind_data) {
 	auto &multi_file_data = bind_data->Cast<MultiFileBindData>();
-	auto &info = multi_file_data.multi_file_reader->Cast<HiveMultiFileReader>().ScanInfo();
-	auto result = info.format_bind_info ? info.format_bind_info(bind_data) : BindInfo(ScanType::EXTERNAL);
-	result.table = info.table;
-	return result;
+	return multi_file_data.multi_file_reader->Cast<HiveMultiFileReader>().ScanInfo().table;
 }
 
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
@@ -635,8 +632,7 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	scan_function.statistics_extended = HivePartitionStatistics;
 	// and the row count comes from a sampled file rather than the format's constant
 	scan_function.cardinality = HiveScanCardinality;
-	scan_info->format_bind_info = scan_function.get_bind_info;
-	scan_function.get_bind_info = GlueHiveBindInfo;
+	scan_function.get_table_entry = GlueHiveGetTableEntry;
 
 	vector<LogicalType> return_types;
 	vector<Identifier> names;
