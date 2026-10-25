@@ -36,7 +36,9 @@ struct GlueCreateTableOptions {
 //! A Glue database, exposed as a DuckDB schema
 class GlueSchemaEntry : public SchemaCatalogEntry {
 public:
-	GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, GlueDatabaseInfo database_info);
+	//! 'database_loaded' false: only the name of 'database_info' is known, GetDatabaseInfo asks Glue for the rest
+	GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, GlueDatabaseInfo database_info,
+	                bool database_loaded = true);
 	~GlueSchemaEntry() override;
 
 public:
@@ -81,6 +83,10 @@ public:
 	//! The definition a write rewrites: the bound entry's. Under a connection-scoped metadata cache the entry may
 	//! predate a change by another connection, so it is fetched again first.
 	const GlueTableInfo &DefinitionForWrite(ClientContext &context, const CatalogEntry &entry);
+	//! The database definition, asked from Glue first if the entry was created from the name alone
+	const GlueDatabaseInfo &GetDatabaseInfo(ClientContext &context);
+	//! Take the definition of a database known by name alone from a listing; no-op once it is loaded
+	void SetDatabaseInfo(const GlueDatabaseInfo &database);
 
 private:
 	optional_ptr<CatalogEntry> CreateTableInternal(CatalogTransaction transaction, BoundCreateTableInfo &info,
@@ -94,9 +100,15 @@ private:
 	void SetTableComment(ClientContext &context, const GlueTableInfo &table, SetCommentInfo &info);
 
 public:
-	//! The database definition as returned by Glue
+	//! The database definition as returned by Glue. Read anything but the name through GetDatabaseInfo: an entry
+	//! created from a table lookup knows only the name until then
 	GlueDatabaseInfo database_info;
 	GlueTableSet tables;
+
+private:
+	//! Guards the fields of 'database_info' other than the name, which never changes
+	mutex database_info_lock;
+	bool database_loaded;
 };
 
 } // namespace duckdb
