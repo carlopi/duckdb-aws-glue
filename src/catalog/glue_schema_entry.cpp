@@ -82,6 +82,16 @@ bool GlueSchemaEntry::IsBucketingOption(const string &key) {
 	       StringUtil::CIEquals(key, "SortColumns");
 }
 
+template <idx_t N>
+static string LookupSpelling(const pair<const char *, const char *> (&spellings)[N], const string &key) {
+	for (auto &spelling : spellings) {
+		if (StringUtil::CIEquals(key, spelling.first)) {
+			return spelling.second;
+		}
+	}
+	return string();
+}
+
 //! The Glue option another spelling of a bucketing option stands for, empty if the key is none of them
 static string BucketingOptionFor(const string &key) {
 	static const pair<const char *, const char *> SPELLINGS[] = {
@@ -89,12 +99,16 @@ static string BucketingOptionFor(const string &key) {
 	    {"clustered_by", "BucketColumns"},   {"number_of_buckets", "NumberOfBuckets"},
 	    {"bucket_count", "NumberOfBuckets"}, {"sort_columns", "SortColumns"},
 	    {"sorted_by", "SortColumns"}};
-	for (auto &spelling : SPELLINGS) {
-		if (StringUtil::CIEquals(key, spelling.first)) {
-			return spelling.second;
-		}
-	}
-	return string();
+	return LookupSpelling(SPELLINGS, key);
+}
+
+//! The spelling to use for another engine's CREATE TABLE option, empty if the key is none of them
+static string OtherEngineOptionFor(const string &key) {
+	static const pair<const char *, const char *> SPELLINGS[] = {{"partitioned_by", "a PARTITIONED BY (...) clause"},
+	                                                             {"partitioning", "a PARTITIONED BY (...) clause"},
+	                                                             {"external_location", "option 'location'"},
+	                                                             {"field_delimiter", "option 'delimiter'"}};
+	return LookupSpelling(SPELLINGS, key);
 }
 
 static void CheckBucketedTablesEnabled(ClientContext &context, const string &key) {
@@ -305,6 +319,8 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 			// stored as a table parameter this would silently leave the table unbucketed
 			throw BinderException("Unknown CREATE TABLE option '%s', a bucketed Glue table is created with option '%s'",
 			                      key, BucketingOptionFor(key));
+		} else if (!OtherEngineOptionFor(key).empty()) {
+			throw BinderException("Unknown CREATE TABLE option '%s', use %s instead", key, OtherEngineOptionFor(key));
 		} else {
 			// everything else is a table property, stored in Glue's table parameters (like Hive / Trino do)
 			result.parameters[key] = string_value;
