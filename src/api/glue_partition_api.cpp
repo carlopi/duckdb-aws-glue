@@ -17,6 +17,7 @@
 #include <aws/glue/model/DeletePartitionRequest.h>
 #include <aws/glue/model/GetPartitionRequest.h>
 #include <aws/glue/model/GetPartitionsRequest.h>
+#include <aws/glue/model/Partition.h>
 #include <aws/glue/model/Segment.h>
 #include <aws/glue/model/UpdatePartitionRequest.h>
 
@@ -189,20 +190,32 @@ static constexpr idx_t GLUE_DEFAULT_PARTITION_SEGMENTS = 8;
 //! The maximum Glue accepts for Segment::TotalSegments
 static constexpr idx_t GLUE_MAX_PARTITION_SEGMENTS = 10;
 
+GluePartitionInfo GluePartitionInfo::FromPartition(const Aws::Glue::Model::Partition &partition, bool include_columns) {
+	GluePartitionInfo result;
+	for (auto &value : partition.GetValues()) {
+		result.values.push_back(ToStdString(value));
+	}
+	result.location = ToStdString(partition.GetStorageDescriptor().GetLocation());
+	if (include_columns) {
+		result.columns = ToColumns(partition.GetStorageDescriptor().GetColumns());
+	}
+	return result;
+}
+
 //! One chain of GetPartitions requests: pages through the partitions of segment 'segment_number' (the whole table
 //! when 'total_segments' is 1) and appends them to 'result'
 static void FetchPartitionSegment(Aws::Glue::GlueClient &client, const GlueCatalog &catalog,
                                   const string &database_name, const string &table_name, int segment_number,
-                                  int total_segments, vector<GluePartitionInfo> &result) {
+                                  int total_segments, bool include_columns, vector<GluePartitionInfo> &result) {
 	Aws::String next_token;
 	do {
 		Aws::Glue::Model::GetPartitionsRequest request;
 		SetCatalogId(request, catalog);
 		request.SetDatabaseName(database_name);
 		request.SetTableName(table_name);
-		// Only the values and the location of a partition are used. The column schema every partition repeats is a
-		// large part of the response, and fewer bytes per partition means more partitions per page.
-		request.SetExcludeColumnSchema(true);
+		// The column schema every partition repeats is a large part of the response, and fewer bytes per partition
+		// means more partitions per page.
+		request.SetExcludeColumnSchema(!include_columns);
 		request.SetMaxResults(GLUE_PARTITIONS_PAGE_SIZE);
 		if (total_segments > 1) {
 			Aws::Glue::Model::Segment segment;
@@ -219,12 +232,7 @@ static void FetchPartitionSegment(Aws::Glue::GlueClient &client, const GlueCatal
 		}
 		auto &partitions = outcome.GetResult();
 		for (auto &partition : partitions.GetPartitions()) {
-			GluePartitionInfo info;
-			for (auto &value : partition.GetValues()) {
-				info.values.push_back(ToStdString(value));
-			}
-			info.location = ToStdString(partition.GetStorageDescriptor().GetLocation());
-			result.push_back(std::move(info));
+			result.push_back(GluePartitionInfo::FromPartition(partition, include_columns));
 		}
 		next_token = partitions.GetNextToken();
 	} while (!next_token.empty());
@@ -234,16 +242,19 @@ class FetchPartitionSegmentTask : public BaseExecutorTask {
 public:
 	FetchPartitionSegmentTask(TaskExecutor &executor, ClientContext &context, Aws::Glue::GlueClient &client,
 	                          const GlueCatalog &catalog, const string &database_name, const string &table_name,
-	                          int segment_number, int total_segments, vector<GluePartitionInfo> &result)
+	                          int segment_number, int total_segments, bool include_columns,
+	                          vector<GluePartitionInfo> &result)
 	    : BaseExecutorTask(executor), context(context), client(client), catalog(catalog), database_name(database_name),
-	      table_name(table_name), segment_number(segment_number), total_segments(total_segments), result(result) {
+	      table_name(table_name), segment_number(segment_number), total_segments(total_segments),
+	      include_columns(include_columns), result(result) {
 	}
 
 	void ExecuteTask() override {
 		// thread local: without it a worker's requests use the database level HTTP settings and stay out of this
 		// connection's HTTP log
 		GlueHttpClientContextScope http_scope(context);
-		FetchPartitionSegment(client, catalog, database_name, table_name, segment_number, total_segments, result);
+		FetchPartitionSegment(client, catalog, database_name, table_name, segment_number, total_segments,
+		                      include_columns, result);
 	}
 	string TaskType() const override {
 		return "FetchPartitionSegmentTask";
@@ -257,6 +268,7 @@ private:
 	const string &table_name;
 	int segment_number;
 	int total_segments;
+	bool include_columns;
 	vector<GluePartitionInfo> &result;
 };
 
@@ -279,21 +291,22 @@ static int GetPartitionSegmentCount(ClientContext &context, const GlueCatalog &c
 }
 
 vector<GluePartitionInfo> GlueAPI::GetPartitions(ClientContext &context, GlueCatalog &catalog,
-                                                 const string &database_name, const string &table_name) {
+                                                 const string &database_name, const string &table_name,
+                                                 bool include_columns) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	auto total_segments = GetPartitionSegmentCount(context, catalog);
 	vector<vector<GluePartitionInfo>> segment_results(NumericCast<idx_t>(total_segments));
 
 	if (total_segments == 1) {
-		FetchPartitionSegment(*client, catalog, database_name, table_name, 0, 1, segment_results[0]);
+		FetchPartitionSegment(*client, catalog, database_name, table_name, 0, 1, include_columns, segment_results[0]);
 	} else {
 		// the segments do not overlap, so their requests can run at the same time
 		TaskExecutor executor(context, TaskSchedulerType::ASYNC);
 		for (int segment = 0; segment < total_segments; segment++) {
 			executor.ScheduleTask(make_uniq<FetchPartitionSegmentTask>(
 			    executor, context, *client, catalog, database_name, table_name, segment, total_segments,
-			    segment_results[NumericCast<idx_t>(segment)]));
+			    include_columns, segment_results[NumericCast<idx_t>(segment)]));
 		}
 		executor.WorkOnTasks();
 	}

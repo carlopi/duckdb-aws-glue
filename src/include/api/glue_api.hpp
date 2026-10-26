@@ -121,9 +121,10 @@ public:
 	static string RenamePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                              const string &table_name, const GluePartitionDetails &partition,
 	                              const vector<string> &new_values);
-	//! List the partitions of a Hive table (GetPartitions, all pages)
+	//! List the partitions of a Hive table (GetPartitions, all pages), with their columns when 'include_columns' is set
 	static vector<GluePartitionInfo> GetPartitions(ClientContext &context, GlueCatalog &catalog,
-	                                               const string &database_name, const string &table_name);
+	                                               const string &database_name, const string &table_name,
+	                                               bool include_columns = false);
 	//! Register partitions of a Hive table (BatchCreatePartition); their StorageDescriptor is the one of 'table',
 	//! as fetched, with each partition's location. Partitions that already exist are skipped; throws for the first
 	//! partition Glue refuses, after retrying the errors that may pass.

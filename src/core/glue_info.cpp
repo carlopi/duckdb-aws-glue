@@ -1,4 +1,6 @@
 #include "core/glue_info.hpp"
+
+#include "catalog/types/type_helpers.hpp"
 #include "core/helpers.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -369,6 +371,15 @@ bool GlueTableInfo::IsSameVersion(const GlueTableInfo &other) const {
 
 string GlueTableInfo::GetMetadataLocation() const {
 	return GetParameter("metadata_location");
+}
+
+optional_idx GluePartitionInfo::FindColumnTypeMismatch(const vector<GlueColumn> &table_columns) const {
+	for (idx_t i = 0; i < MinValue(table_columns.size(), columns.size()); i++) {
+		if (!GlueTypeHelpers::SameColumnType(table_columns[i].type, columns[i].type)) {
+			return i;
+		}
+	}
+	return optional_idx();
 }
 
 } // namespace duckdb

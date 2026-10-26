@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/enums/file_compression_type.hpp"
+#include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/typedefs.hpp"
@@ -10,6 +11,14 @@
 #include "core/glue_format.hpp"
 #include "core/readers/hive_csv_options.hpp"
 #include "core/readers/hive_json_options.hpp"
+
+namespace Aws {
+namespace Glue {
+namespace Model {
+class Partition;
+} // namespace Model
+} // namespace Glue
+} // namespace Aws
 
 namespace duckdb {
 
@@ -190,13 +199,21 @@ struct GluePartitionInput {
 struct GluePartitionInfo {
 	vector<string> values;
 	string location;
+	//! Empty unless the column schema was requested
+	vector<GlueColumn> columns;
+
+	//! The values and the location of a partition, and its columns when 'include_columns' is set
+	static GluePartitionInfo FromPartition(const Aws::Glue::Model::Partition &partition, bool include_columns);
+	//! The first data column this partition declares with another type than the table, matched by position as Hive
+	//! matches them. A partition that declares fewer columns (columns added to the table later) only has to agree on
+	//! the columns it declares.
+	optional_idx FindColumnTypeMismatch(const vector<GlueColumn> &table_columns) const;
 };
 
 //! A partition as GetPartition returns it: also its storage descriptor and parameters
 struct GluePartitionDetails : public GluePartitionInfo {
 	string serde_library;
 	unordered_map<string, string> serde_parameters;
-	vector<GlueColumn> columns;
 	unordered_map<string, string> parameters;
 	//! The Partition object this projection was made from
 	shared_ptr<const GlueFetchedPartition> fetched;

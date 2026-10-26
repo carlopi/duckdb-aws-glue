@@ -1,3 +1,5 @@
+add_subdirectory(types)
+
 add_library_unity(
   glue_catalog
   OBJECT
