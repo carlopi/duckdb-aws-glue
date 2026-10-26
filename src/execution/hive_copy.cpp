@@ -1,5 +1,6 @@
 #include "execution/hive_copy.hpp"
 
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
 
 #include "catalog/glue_catalog.hpp"
@@ -13,18 +14,36 @@
 namespace duckdb {
 
 //! A CREATE TABLE AS writes only to a location without data files: the files of a dropped table there would read as
-//! rows of the new one. Files a scan skips (_SUCCESS, directory markers, empty files) do not count.
-static void ThrowIfLocationHoldsFiles(ClientContext &context, const GlueTableInfo &table_info, const string &location) {
+//! rows of the new one. Files a scan skips (_SUCCESS, directory markers, empty files) do not count; with 'overwrite'
+//! the data files are deleted instead.
+static void ClearLocation(ClientContext &context, const GlueTableInfo &table_info, const string &location,
+                          bool overwrite) {
 	auto &fs = FileSystem::GetFileSystem(context);
 	auto listing = fs.GlobFileList(location + "/**", FileGlobOptions::ALLOW_EMPTY);
+	vector<string> data_files;
 	for (auto &file : listing->Files()) {
 		if (!IsDataFile(file, location + "/")) {
 			continue;
 		}
-		throw InvalidInputException("CREATE TABLE AS for Hive table '%s.%s' is not supported: its location '%s' "
-		                            "already holds files (e.g. '%s'), such as those of a dropped table, which would "
-		                            "read as rows of the new table. Delete them, or give the table another location",
-		                            table_info.schema_name, table_info.name, location, file.path);
+		if (!overwrite) {
+			throw InvalidInputException("CREATE TABLE AS for Hive table '%s.%s' is not supported: its location '%s' "
+			                            "already holds files (e.g. '%s'), such as those of a dropped table, which "
+			                            "would read as rows of the new table. Delete them, give the table another "
+			                            "location, or create it WITH (overwrite = true) to delete them",
+			                            table_info.schema_name, table_info.name, location, file.path);
+		}
+		data_files.push_back(file.path);
+	}
+	if (data_files.empty()) {
+		return;
+	}
+	try {
+		fs.RemoveFiles(data_files);
+	} catch (std::exception &ex) {
+		ErrorData error(ex);
+		throw IOException("CREATE TABLE AS for Hive table '%s.%s' failed deleting the %d data files at its location "
+		                  "'%s', so the table was not created; some of the files may already be deleted: %s",
+		                  table_info.schema_name, table_info.name, data_files.size(), location, error.RawMessage());
 	}
 }
 
@@ -45,7 +64,8 @@ unique_ptr<GlobalSinkState> GlueHiveCopy::GetGlobalSinkState(ClientContext &cont
 		if (!table_created) {
 			auto location = table_info.location;
 			StringUtil::RTrim(location, "/");
-			ThrowIfLocationHoldsFiles(context, table_info, location);
+			auto overwrite = GlueSchemaEntry::ParseCreateTableOptions(context, info->Base()).overwrite;
+			ClearLocation(context, table_info, location, overwrite);
 			auto &create_schema = *schema.get_mutable();
 			auto &catalog = create_schema.catalog;
 			auto created = create_schema.CreateTableFromInfo(catalog.GetCatalogTransaction(context), *info, table_info);
