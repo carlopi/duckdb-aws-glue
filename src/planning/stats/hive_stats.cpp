@@ -1,5 +1,6 @@
 #include "planning/stats/hive_stats.hpp"
 
+#include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
@@ -130,32 +131,84 @@ static optional_idx SampleLineOrientedRowsPerFile(ClientContext &context, const 
 	return MaxValue<idx_t>(rows, 1);
 }
 
-//! The rows of one data file: from the footer for parquet, from the lines of a bounded prefix for csv and json
-static optional_idx RowsInFile(ClientContext &context, const MultiFileBindData &bind_data, const HiveScanInfo &info,
-                               const OpenFileInfo &file) {
-	switch (info.file_format) {
-	case HiveFileFormat::PARQUET: {
-		// the row count is in the footer, and the format's own reader is the only thing that can read it. Parquet is
-		// bound with no named parameters, so a reader built from default options reads the file as the scan will
+//===--------------------------------------------------------------------===//
+// Parquet footers
+//===--------------------------------------------------------------------===//
+//! What the footer of a Parquet file says, read with the scan's reader options
+struct HiveFileFooter {
+	//! False when the footer could not be read
+	bool readable = false;
+	optional_idx rows;
+	//! The statistics of the file's top-level columns, by the file's column name
+	case_insensitive_map_t<unique_ptr<BaseStatistics>> columns;
+};
+
+static shared_ptr<const HiveFileFooter> ReadParquetFooter(ClientContext &context, const MultiFileBindData &bind_data,
+                                                          const HiveScanInfo &info, const OpenFileInfo &file) {
+	auto result = make_shared_ptr<HiveFileFooter>();
+	try {
+		// the options the scan was bound with: can_have_nan and binary_as_string change what the statistics say
 		auto options = bind_data.interface->InitializeOptions(context, nullptr);
+		auto file_options = bind_data.file_options;
+		for (auto &parameter : info.reader_parameters) {
+			bind_data.interface->ParseOption(context, parameter.first, parameter.second, file_options, *options);
+		}
 		// a throwaway copy of the bind data: Initialize and FinalizeBindData write the opened file's numbers into it,
 		// and the real bind data must not be rewritten behind the running scan
 		auto probe = bind_data.Copy();
 		auto &probe_data = probe->Cast<MultiFileBindData>();
-		auto reader = bind_data.multi_file_reader->CreateReader(context, file, *options, bind_data.file_options,
-		                                                        *probe_data.interface);
+		auto reader =
+		    bind_data.multi_file_reader->CreateReader(context, file, *options, file_options, *probe_data.interface);
 		if (!reader) {
-			return optional_idx();
+			return std::move(result);
+		}
+		for (auto &column : reader->GetColumns()) {
+			auto statistics = reader->GetStatistics(context, column.name);
+			if (statistics) {
+				result->columns.emplace(column.name.GetIdentifierName(), std::move(statistics));
+			}
 		}
 		probe_data.Initialize(std::move(reader));
 		probe_data.interface->FinalizeBindData(probe_data);
 		// file_count 1 makes the format report that one file's rows rather than an extrapolation over the list
 		auto rows = probe_data.interface->GetCardinality(context, probe_data, 1);
 		if (rows && rows->has_estimated_cardinality) {
-			return rows->estimated_cardinality;
+			result->rows = rows->estimated_cardinality;
 		}
-		return optional_idx();
+		result->readable = true;
+	} catch (std::exception &ex) {
+		// costing must not fail a query: the scan reports a file it cannot read
+		ErrorData error(ex);
+		DUCKDB_LOG_WARNING(context, "Could not read the footer of '%s' of Hive table '%s': %s", file.path,
+		                   info.Describe(), error.RawMessage());
+		result->columns.clear();
+		result->rows = optional_idx();
 	}
+	return std::move(result);
+}
+
+//! The footer of a Parquet file the scan reads, read once per query for the sample and every scan of the file
+static shared_ptr<const HiveFileFooter> ParquetFileFooter(ClientContext &context, const MultiFileBindData &bind_data,
+                                                          const HiveScanInfo &info, const OpenFileInfo &file) {
+	auto key = file.path;
+	for (auto &parameter : info.reader_parameters) {
+		key += "\x1f" + parameter.first.GetIdentifierName() + "=" + parameter.second.ToString();
+	}
+	auto entry = HiveQueryCache::Get(context)->GetFileFooter(key);
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	if (!entry->footer) {
+		entry->footer = ReadParquetFooter(context, bind_data, info, file);
+	}
+	return entry->footer;
+}
+
+//! The rows of one data file: from the footer for parquet, from the lines of a bounded prefix for csv and json
+static optional_idx RowsInFile(ClientContext &context, const MultiFileBindData &bind_data, const HiveScanInfo &info,
+                               const OpenFileInfo &file) {
+	switch (info.file_format) {
+	case HiveFileFormat::PARQUET:
+		// the row count is in the footer, and the format's own reader is the only thing that can read it
+		return ParquetFileFooter(context, bind_data, info, file)->rows;
 	case HiveFileFormat::CSV:
 	case HiveFileFormat::JSON:
 		// no reader is built for these: they are bound with a dialect and an explicit column list that fresh options
@@ -346,11 +399,64 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 }
 
 //===--------------------------------------------------------------------===//
+// Data column statistics
+//===--------------------------------------------------------------------===//
+//! The files of an unpartitioned scan, when there are at most hive_footer_statistics_max_files of them: its listing is
+//! the one the sample makes anyway. A partitioned scan is not listed for it, which would read its partitions before a
+//! join's filter prunes them
+static bool FilesWithinFooterBound(ClientContext &context, const HiveMultiFileList &list, vector<OpenFileInfo> &files) {
+	idx_t max_files = 16;
+	Value setting;
+	if (context.TryGetCurrentSetting("hive_footer_statistics_max_files", setting) && !setting.IsNull()) {
+		max_files = setting.GetValue<idx_t>();
+	}
+	if (max_files == 0 || !list.ScanInfo().partition_keys.empty()) {
+		return false;
+	}
+	auto count = list.GetFileCount(max_files + 1);
+	if (count.type != FileExpansionType::ALL_FILES_EXPANDED || count.count > max_files) {
+		return false;
+	}
+	files = list.GetAllFiles();
+	return true;
+}
+
+//! A data column's statistics, merged from the footers of every file the scan reads. The optimizer prunes on them (a
+//! filter outside a scan's min and max empties it), so a file whose footer cannot say what the scan reads gives none:
+//! a footer that cannot be read, a column the file lacks (read as NULL) or stores as another type (read cast)
+static unique_ptr<BaseStatistics> FooterStatistics(ClientContext &context, const MultiFileBindData &bind_data,
+                                                   const HiveMultiFileList &list,
+                                                   const MultiFileColumnDefinition &column) {
+	vector<OpenFileInfo> files;
+	if (!FilesWithinFooterBound(context, list, files) || files.empty()) {
+		return nullptr;
+	}
+	unique_ptr<BaseStatistics> result;
+	for (auto &file : files) {
+		auto footer = ParquetFileFooter(context, bind_data, list.ScanInfo(), file);
+		if (!footer->readable) {
+			return nullptr;
+		}
+		auto entry = footer->columns.find(column.name.GetIdentifierName());
+		if (entry == footer->columns.end() || entry->second->GetType() != column.type) {
+			return nullptr;
+		}
+		if (!result) {
+			result = entry->second->ToUnique();
+		} else {
+			result->Merge(*entry->second);
+		}
+	}
+	return result;
+}
+
+//===--------------------------------------------------------------------===//
 // Partition column statistics
 //===--------------------------------------------------------------------===//
 //! Statistics for a partition column, from the values of the partitions the scan will read. We get the
 //! complete set of values the column takes and can derive min/max, the distinct count and has-null.
-//! Columns that are not partition keys are left to the format's own function.
+//! A data column of an unpartitioned parquet scan of few files gets its files' footer statistics; any other column is
+//! left to the format's own function.
 unique_ptr<BaseStatistics> HivePartitionStatistics(ClientContext &context, TableFunctionGetStatisticsInput &input) {
 	auto &bind_data = input.bind_data->Cast<MultiFileBindData>();
 	auto &hive_list = bind_data.file_list->Cast<HiveMultiFileList>();
@@ -366,6 +472,16 @@ unique_ptr<BaseStatistics> HivePartitionStatistics(ClientContext &context, Table
 	}
 	if (key_index == DConstants::INVALID_INDEX) {
 		// a data column, a struct field or a virtual column
+		auto &column_index = input.column_index;
+		if (info.file_format == HiveFileFormat::PARQUET && column_index.HasPrimaryIndex() &&
+		    !column_index.HasChildren() && !column_index.IsVirtualColumn() &&
+		    column_index.GetPrimaryIndex() < bind_data.columns.size()) {
+			auto statistics =
+			    FooterStatistics(context, bind_data, hive_list, bind_data.columns[column_index.GetPrimaryIndex()]);
+			if (statistics) {
+				return statistics;
+			}
+		}
 		return info.format_statistics ? info.format_statistics(context, input) : nullptr;
 	}
 

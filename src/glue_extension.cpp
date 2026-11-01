@@ -103,6 +103,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "is listed once (recursively) instead of one listing per partition. Default 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(10));
 
+	config.AddExtensionOption("hive_footer_statistics_max_files",
+	                          "A parquet scan that reads at most this many files gives the optimizer each column's "
+	                          "min, max and NULLs, merged from the footers of all of them; a scan of more files gives "
+	                          "none. 0 turns it off. Default 16.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(16));
+
 	config.AddExtensionOption("hive_csv_parallel",
 	                          "Read each file of an OpenCSVSerde table with several threads when a scan has at most "
 	                          "twice `threads` files. False reads one thread per file, which a file that holds a line "
