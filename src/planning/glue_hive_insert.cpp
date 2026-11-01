@@ -622,7 +622,10 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 			}
 			registered = &created;
 		}
+		// a cancel during registration would fail the statement with its rows in the table: undo the write instead
+		context.InterruptCheck();
 		GlueAPI::BatchCreatePartitions(context, catalog, *registered, to_register);
+		context.InterruptCheck();
 	} catch (std::exception &ex) {
 		// Undo the INSERT by deleting the files it wrote, so that running it again does not add its rows twice. The
 		// partitions it registered stay, empty: another INSERT may have added rows to them in the meantime.
@@ -638,6 +641,9 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		// the files are gone; the write stays with the transaction, whose rollback drops a table CTAS created
 		if (auto write = transaction.FindHiveWrite(write_id)) {
 			write->files_deleted = true;
+		}
+		if (error.Type() == ExceptionType::INTERRUPT) {
+			error.Throw();
 		}
 		throw IOException("INSERT into Hive table '%s.%s' was rolled back: %s. The files it wrote were deleted, so it "
 		                  "can be run again",
