@@ -305,7 +305,7 @@ unique_ptr<FunctionData> GlueAddPartitionBind(ClientContext &context, TableFunct
                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GluePartitionChangeBindData>();
 	result->target = ResolveGlueTable(context, "glue_add_partition", input.inputs[0]);
-	GlueCatalog::ThrowIfInExplicitTransaction(context);
+	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_add_partition");
 	result->values = ParsePartitionSpec("glue_add_partition", result->target, input.inputs[1]);
 	for (auto &option : input.named_parameters) {
 		auto name = StringUtil::Lower(option.first.GetIdentifierName());
@@ -350,7 +350,7 @@ unique_ptr<FunctionData> GlueDropPartitionBind(ClientContext &context, TableFunc
                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GluePartitionChangeBindData>();
 	result->target = ResolveGlueTable(context, "glue_drop_partition", input.inputs[0]);
-	GlueCatalog::ThrowIfInExplicitTransaction(context);
+	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_drop_partition");
 	result->values = ParsePartitionSpec("glue_drop_partition", result->target, input.inputs[1]);
 	for (auto &option : input.named_parameters) {
 		auto name = StringUtil::Lower(option.first.GetIdentifierName());
@@ -388,7 +388,7 @@ unique_ptr<FunctionData> GlueRenamePartitionBind(ClientContext &context, TableFu
                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GluePartitionChangeBindData>();
 	result->target = ResolveGlueTable(context, "glue_rename_partition", input.inputs[0]);
-	GlueCatalog::ThrowIfInExplicitTransaction(context);
+	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_rename_partition");
 	result->values = ParsePartitionSpec("glue_rename_partition", result->target, input.inputs[1]);
 	result->new_values = ParsePartitionSpec("glue_rename_partition", result->target, input.inputs[2]);
 	names = {"location"};
@@ -436,7 +436,7 @@ unique_ptr<FunctionData> GlueSetPartitionLocationBind(ClientContext &context, Ta
                                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GluePartitionChangeBindData>();
 	result->target = ResolveGlueTable(context, "glue_set_partition_location", input.inputs[0]);
-	GlueCatalog::ThrowIfInExplicitTransaction(context);
+	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_set_partition_location");
 	result->values = ParsePartitionSpec("glue_set_partition_location", result->target, input.inputs[1]);
 	result->location = ParseLocation("glue_set_partition_location", input.inputs[2]);
 	names = {"location"};
@@ -463,7 +463,7 @@ unique_ptr<FunctionData> GlueSetTableLocationBind(ClientContext &context, TableF
                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GluePartitionChangeBindData>();
 	result->target = ResolveGlueTable(context, "glue_set_table_location", input.inputs[0], false);
-	GlueCatalog::ThrowIfInExplicitTransaction(context);
+	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_set_table_location");
 	result->location = ParseLocation("glue_set_table_location", input.inputs[1]);
 	names = {"location"};
 	return_types = {LogicalType::VARCHAR};
@@ -513,7 +513,7 @@ unique_ptr<FunctionData> GlueReplaceColumnsBind(ClientContext &context, TableFun
                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GlueReplaceColumnsBindData>();
 	result->target = ResolveGlueTable(context, "glue_replace_columns", input.inputs[0], false);
-	GlueCatalog::ThrowIfInExplicitTransaction(context);
+	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_replace_columns");
 	auto &table = result->target.table;
 	auto &columns = input.inputs[1];
 	if (!IsStringStruct(columns) || StructType::GetChildCount(columns.type()) == 0) {
