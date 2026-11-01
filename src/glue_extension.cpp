@@ -104,9 +104,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::UBIGINT, Value::UBIGINT(10));
 
 	config.AddExtensionOption("hive_footer_statistics_max_files",
-	                          "A parquet scan that reads at most this many files gives the optimizer each column's "
-	                          "min, max and NULLs, merged from the footers of all of them; a scan of more files gives "
-	                          "none. 0 turns it off. Default 16.",
+	                          "An unpartitioned parquet scan that reads at most this many files gives the optimizer "
+	                          "its exact row count and each column's min, max and NULLs, from the footers of all of "
+	                          "them; a scan of more files gives an estimate and no column statistics. 0 turns it "
+	                          "off. Default 16.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(16));
 
 	config.AddExtensionOption("hive_csv_parallel",

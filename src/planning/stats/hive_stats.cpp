@@ -11,6 +11,7 @@
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/logging/logger.hpp"
+#include "duckdb/parallel/task_executor.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
@@ -147,18 +148,19 @@ static shared_ptr<const HiveFileFooter> ReadParquetFooter(ClientContext &context
                                                           const HiveScanInfo &info, const OpenFileInfo &file) {
 	auto result = make_shared_ptr<HiveFileFooter>();
 	try {
-		// the options the scan was bound with: can_have_nan and binary_as_string change what the statistics say
-		auto options = bind_data.interface->InitializeOptions(context, nullptr);
-		auto file_options = bind_data.file_options;
-		for (auto &parameter : info.reader_parameters) {
-			bind_data.interface->ParseOption(context, parameter.first, parameter.second, file_options, *options);
-		}
 		// a throwaway copy of the bind data: Initialize and FinalizeBindData write the opened file's numbers into it,
-		// and the real bind data must not be rewritten behind the running scan
+		// and the real bind data must not be rewritten behind the running scan. Footers are read concurrently, so only
+		// the copy's reader and interface are used
 		auto probe = bind_data.Copy();
 		auto &probe_data = probe->Cast<MultiFileBindData>();
+		// the options the scan was bound with: can_have_nan and binary_as_string change what the statistics say
+		auto options = probe_data.interface->InitializeOptions(context, nullptr);
+		auto file_options = probe_data.file_options;
+		for (auto &parameter : info.reader_parameters) {
+			probe_data.interface->ParseOption(context, parameter.first, parameter.second, file_options, *options);
+		}
 		auto reader =
-		    bind_data.multi_file_reader->CreateReader(context, file, *options, file_options, *probe_data.interface);
+		    probe_data.multi_file_reader->CreateReader(context, file, *options, file_options, *probe_data.interface);
 		if (!reader) {
 			return std::move(result);
 		}
@@ -187,19 +189,111 @@ static shared_ptr<const HiveFileFooter> ReadParquetFooter(ClientContext &context
 	return std::move(result);
 }
 
-//! The footer of a Parquet file the scan reads, read once per query for the sample and every scan of the file
-static shared_ptr<const HiveFileFooter> ParquetFileFooter(ClientContext &context, const MultiFileBindData &bind_data,
-                                                          const HiveScanInfo &info, const OpenFileInfo &file) {
+//! The query's cache entry for the footer of a Parquet file the scan reads, by the file and the reader options
+static shared_ptr<HiveFileFooterEntry> FooterEntry(ClientContext &context, const HiveScanInfo &info,
+                                                   const OpenFileInfo &file) {
 	auto key = file.path;
 	for (auto &parameter : info.reader_parameters) {
 		key += "\x1f" + parameter.first.GetIdentifierName() + "=" + parameter.second.ToString();
 	}
-	auto entry = HiveQueryCache::Get(context)->GetFileFooter(key);
+	return HiveQueryCache::Get(context)->GetFileFooter(key);
+}
+
+//! The footer of a Parquet file the scan reads, read once per query for the sample and every scan of the file
+static shared_ptr<const HiveFileFooter> ParquetFileFooter(ClientContext &context, const MultiFileBindData &bind_data,
+                                                          const HiveScanInfo &info, const OpenFileInfo &file) {
+	auto entry = FooterEntry(context, info, file);
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
 	if (!entry->footer) {
 		entry->footer = ReadParquetFooter(context, bind_data, info, file);
 	}
 	return entry->footer;
+}
+
+static bool FooterRead(ClientContext &context, const HiveScanInfo &info, const OpenFileInfo &file) {
+	auto entry = FooterEntry(context, info, file);
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	return entry->footer != nullptr;
+}
+
+class FooterReadTask : public BaseExecutorTask {
+public:
+	FooterReadTask(TaskExecutor &executor, ClientContext &context, const MultiFileBindData &bind_data,
+	               const HiveScanInfo &info, const OpenFileInfo &file)
+	    : BaseExecutorTask(executor), context(context), bind_data(bind_data), info(info), file(file) {
+	}
+
+	void ExecuteTask() override {
+		ParquetFileFooter(context, bind_data, info, file);
+	}
+	string TaskType() const override {
+		return "FooterReadTask";
+	}
+
+private:
+	ClientContext &context;
+	const MultiFileBindData &bind_data;
+	const HiveScanInfo &info;
+	const OpenFileInfo &file;
+};
+
+//! Read the footers of 'files' not read yet in this query, a request each on object storage, at the same time
+static void ReadParquetFooters(ClientContext &context, const MultiFileBindData &bind_data, const HiveScanInfo &info,
+                               const vector<OpenFileInfo> &files) {
+	vector<reference<const OpenFileInfo>> unread;
+	for (auto &file : files) {
+		if (!FooterRead(context, info, file)) {
+			unread.push_back(file);
+		}
+	}
+	if (unread.size() < 2) {
+		return;
+	}
+	TaskExecutor executor(context, TaskSchedulerType::ASYNC);
+	for (auto &file : unread) {
+		executor.ScheduleTask(make_uniq<FooterReadTask>(executor, context, bind_data, info, file.get()));
+	}
+	executor.WorkOnTasks();
+}
+
+//! The files of an unpartitioned scan, when there are at most hive_footer_statistics_max_files of them: its listing is
+//! the one the sample makes anyway. A partitioned scan is not listed for it, which would read its partitions before a
+//! join's filter prunes them
+static bool FilesWithinFooterBound(ClientContext &context, const HiveMultiFileList &list, vector<OpenFileInfo> &files) {
+	idx_t max_files = 16;
+	Value setting;
+	if (context.TryGetCurrentSetting("hive_footer_statistics_max_files", setting) && !setting.IsNull()) {
+		max_files = setting.GetValue<idx_t>();
+	}
+	if (max_files == 0 || !list.ScanInfo().partition_keys.empty()) {
+		return false;
+	}
+	auto count = list.GetFileCount(max_files + 1);
+	if (count.type != FileExpansionType::ALL_FILES_EXPANDED || count.count > max_files) {
+		return false;
+	}
+	files = list.GetAllFiles();
+	return true;
+}
+
+//! The rows of a parquet scan within the footer bound, added up from the footers of all its files: exact, where the
+//! sample extrapolates from one file
+static optional_idx FooterRows(ClientContext &context, const MultiFileBindData &bind_data,
+                               const HiveMultiFileList &list) {
+	vector<OpenFileInfo> files;
+	if (list.ScanInfo().file_format != HiveFileFormat::PARQUET || !FilesWithinFooterBound(context, list, files)) {
+		return optional_idx();
+	}
+	ReadParquetFooters(context, bind_data, list.ScanInfo(), files);
+	idx_t rows = 0;
+	for (auto &file : files) {
+		auto footer = ParquetFileFooter(context, bind_data, list.ScanInfo(), file);
+		if (!footer->readable || !footer->rows.IsValid()) {
+			return optional_idx();
+		}
+		rows += footer->rows.GetIndex();
+	}
+	return rows;
 }
 
 //! The rows of one data file: from the footer for parquet, from the lines of a bounded prefix for csv and json
@@ -325,7 +419,7 @@ static shared_ptr<const HiveTableSample> SampleTable(ClientContext &context, con
 
 //! Cardinality of a Hive scan: the files listed for the table, measured once per query, scaled to the partitions
 //! this scan reads. Replaces a constant: without it a 40-row dimension table and a 200,000-row fact table cost the
-//! same, and csv and json are estimated at one row.
+//! same, and csv and json are estimated at one row. A parquet scan within the footer bound is counted instead.
 unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const FunctionData *bind_data_p) {
 	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
 	auto &hive_list = bind_data.file_list->Cast<HiveMultiFileList>();
@@ -334,6 +428,11 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 	auto partitions = info.partition_keys.empty() ? idx_t(1) : hive_list.PartitionIndexes()->size();
 	if (partitions == 0) {
 		return make_uniq<NodeStatistics>(0);
+	}
+	auto footer_rows = FooterRows(context, bind_data, hive_list);
+	if (footer_rows.IsValid()) {
+		// counted rather than estimated, so it is also the max, as a table scan reports its count
+		return make_uniq<NodeStatistics>(footer_rows.GetIndex(), footer_rows.GetIndex());
 	}
 	auto sample_ptr = SampleTable(context, bind_data, hive_list);
 	auto &sample = *sample_ptr;
@@ -401,26 +500,6 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 //===--------------------------------------------------------------------===//
 // Data column statistics
 //===--------------------------------------------------------------------===//
-//! The files of an unpartitioned scan, when there are at most hive_footer_statistics_max_files of them: its listing is
-//! the one the sample makes anyway. A partitioned scan is not listed for it, which would read its partitions before a
-//! join's filter prunes them
-static bool FilesWithinFooterBound(ClientContext &context, const HiveMultiFileList &list, vector<OpenFileInfo> &files) {
-	idx_t max_files = 16;
-	Value setting;
-	if (context.TryGetCurrentSetting("hive_footer_statistics_max_files", setting) && !setting.IsNull()) {
-		max_files = setting.GetValue<idx_t>();
-	}
-	if (max_files == 0 || !list.ScanInfo().partition_keys.empty()) {
-		return false;
-	}
-	auto count = list.GetFileCount(max_files + 1);
-	if (count.type != FileExpansionType::ALL_FILES_EXPANDED || count.count > max_files) {
-		return false;
-	}
-	files = list.GetAllFiles();
-	return true;
-}
-
 //! A data column's statistics, merged from the footers of every file the scan reads. The optimizer prunes on them (a
 //! filter outside a scan's min and max empties it), so a file whose footer cannot say what the scan reads gives none:
 //! a footer that cannot be read, a column the file lacks (read as NULL) or stores as another type (read cast)
@@ -431,6 +510,7 @@ static unique_ptr<BaseStatistics> FooterStatistics(ClientContext &context, const
 	if (!FilesWithinFooterBound(context, list, files) || files.empty()) {
 		return nullptr;
 	}
+	ReadParquetFooters(context, bind_data, list.ScanInfo(), files);
 	unique_ptr<BaseStatistics> result;
 	for (auto &file : files) {
 		auto footer = ParquetFileFooter(context, bind_data, list.ScanInfo(), file);

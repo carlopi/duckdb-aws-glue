@@ -1,5 +1,5 @@
 # name: test/sql/hive/hive_scan/scan_partitioned/test_footer_statistics_glue.test
-# description: The scan of an unpartitioned Glue parquet table of at most hive_footer_statistics_max_files files gives each data column its files' footer statistics, merged; a partitioned table's data columns get none, and its partition keys keep the exact statistics of the partition values
+# description: The scan of an unpartitioned Glue parquet table of at most hive_footer_statistics_max_files files gives each data column its files' footer statistics, merged, and its exact row count; a partitioned table's data columns get none, and its partition keys keep the exact statistics of the partition values
 # group: [scan_partitioned]
 
 require httpfs
@@ -42,6 +42,22 @@ SELECT count(*) FROM my_datalake.default.fsg_dim WHERE id > 8;
 ----
 2
 
+# the footers' row counts add up to the table's exact count, which is also its max: a LIMIT above it is dropped
+query II
+EXPLAIN SELECT id FROM my_datalake.default.fsg_dim;
+----
+physical_plan	<REGEX>:.*Hive Scan.*~10 rows.*
+
+query II
+EXPLAIN SELECT id FROM my_datalake.default.fsg_dim LIMIT 100;
+----
+physical_plan	<!REGEX>:.*Limit.*
+
+query I
+SELECT count(*) FROM (SELECT id FROM my_datalake.default.fsg_dim LIMIT 100);
+----
+10
+
 # two scans of the table, as q85 joins customer_demographics with itself
 query II rowsort
 SELECT a.id, b.name FROM my_datalake.default.fsg_dim a JOIN my_datalake.default.fsg_dim b ON a.id = b.id WHERE a.id IN (4, 5, 6);
@@ -68,7 +84,13 @@ SELECT count(*), sum(v) FROM my_datalake.default.fsg_fact WHERE v > 150;
 ----
 50	8775
 
-# over the bound, the unpartitioned table's columns get none
+# and its row count stays an estimate
+query II
+EXPLAIN SELECT v FROM my_datalake.default.fsg_fact LIMIT 1000;
+----
+physical_plan	<REGEX>:.*Limit: 1000.*
+
+# over the bound, the unpartitioned table's columns get none, and its row count is an estimate
 statement ok
 SET hive_footer_statistics_max_files = 1;
 
@@ -81,6 +103,11 @@ query I
 SELECT count(*) FROM my_datalake.default.fsg_dim WHERE id > 8;
 ----
 2
+
+query II
+EXPLAIN SELECT id FROM my_datalake.default.fsg_dim LIMIT 100;
+----
+physical_plan	<REGEX>:.*Limit: 100.*
 
 statement ok
 RESET hive_footer_statistics_max_files;
@@ -96,6 +123,11 @@ query I
 SELECT stats(id) FROM my_datalake.default.fsg_text LIMIT 1;
 ----
 {'has_no_null': true, 'has_null': true}
+
+query II
+EXPLAIN SELECT id FROM my_datalake.default.fsg_text LIMIT 100;
+----
+physical_plan	<REGEX>:.*Limit: 100.*
 
 foreach table fsg_dim fsg_fact fsg_text
 
