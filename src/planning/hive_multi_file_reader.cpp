@@ -271,6 +271,22 @@ void HiveMultiFileList::BuildPartitionLocations() const {
 	}
 }
 
+void HiveMultiFileList::ThrowIfLocationShared(idx_t partition_index) const {
+	auto partitions = scan_info->Partitions(client_context);
+	auto location = (*partitions)[partition_index].location;
+	StringUtil::RTrim(location, "/");
+	auto owner = partition_by_location.find(location);
+	if (owner == partition_by_location.end() || owner->second == partition_index) {
+		return;
+	}
+	// a file belongs to one partition here, while Hive engines read such a file once for each of them
+	throw NotImplementedException("Partitions [%s] and [%s] of Hive table '%s' are registered at the same location "
+	                              "'%s', which DuckDB can not read: register each partition at its own location",
+	                              StringUtil::Join((*partitions)[owner->second].values, ", "),
+	                              StringUtil::Join((*partitions)[partition_index].values, ", "), scan_info->Describe(),
+	                              location);
+}
+
 optional_idx HiveMultiFileList::OwningPartition(const string &file_path, idx_t min_directory_size) const {
 	auto separator = file_path.find_last_of('/');
 	if (separator == string::npos) {
@@ -303,8 +319,9 @@ void HiveMultiFileList::ListPartition(idx_t partition_index) const {
 	auto location = partition.location;
 	StringUtil::RTrim(location, "/");
 	vector<OpenFileInfo> partition_files;
-	ListDataFiles(client_context, CacheListings(client_context, *scan_info), location, partition_files);
 	BuildPartitionLocations();
+	ThrowIfLocationShared(partition_index);
+	ListDataFiles(client_context, CacheListings(client_context, *scan_info), location, partition_files);
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : partition_files) {
 		// skip files of another partition registered at a location nested inside this one
@@ -350,6 +367,9 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 		reading.insert(partition_index);
 	}
 	BuildPartitionLocations();
+	for (auto partition_index : reading) {
+		ThrowIfLocationShared(partition_index);
+	}
 	auto root_prefix = root + "/";
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : files) {

@@ -223,11 +223,31 @@ static void FetchPartitionSegment(Aws::Glue::GlueClient &client, const GlueCatal
 			for (auto &value : partition.GetValues()) {
 				info.values.push_back(ToStdString(value));
 			}
-			info.location = ToStdString(partition.GetStorageDescriptor().GetLocation());
+			info.location =
+			    GlueAPI::NormalizePartitionLocation(ToStdString(partition.GetStorageDescriptor().GetLocation()));
 			result.push_back(std::move(info));
 		}
 		next_token = partitions.GetNextToken();
 	} while (!next_token.empty());
+}
+
+string GlueAPI::NormalizePartitionLocation(const string &location) {
+	// as Hadoop's Path reads it: s3a:// and s3n:// are s3://, and empty path segments are dropped
+	string result = location;
+	auto scheme = StringUtil::Lower(result.substr(0, 6));
+	if (scheme == "s3a://" || scheme == "s3n://") {
+		result = "s3://" + result.substr(6);
+	}
+	auto separator = result.find("://");
+	idx_t path_start = separator == string::npos ? 0 : separator + 3;
+	string normalized = result.substr(0, path_start);
+	for (idx_t i = path_start; i < result.size(); i++) {
+		if (result[i] == '/' && normalized.size() > path_start && normalized.back() == '/') {
+			continue;
+		}
+		normalized += result[i];
+	}
+	return normalized;
 }
 
 class FetchPartitionSegmentTask : public BaseExecutorTask {

@@ -131,6 +131,8 @@ private:
 	vector<OpenFileInfo> SampleRootPartitions(const vector<idx_t> &partitions) const;
 	//! Index every registered partition location, including pruned ones, so attribution does not depend on filters
 	void BuildPartitionLocations() const;
+	//! Refuse to read a partition whose location another partition is registered at too
+	void ThrowIfLocationShared(idx_t partition_index) const;
 	//! The partition of the deepest registered location containing the file, searching no shorter than
 	//! 'min_directory_size'
 	optional_idx OwningPartition(const string &file_path, idx_t min_directory_size) const;

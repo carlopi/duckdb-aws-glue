@@ -94,6 +94,8 @@ public:
 	//! table format is derived from (GlueTableFormat::IsParameter) are refused.
 	static void UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
 	                                  const vector<pair<string, string>> &set, const vector<string> &unset);
+	//! A partition location as Hadoop's Path reads it: an s3:// URI without empty path segments
+	static string NormalizePartitionLocation(const string &location);
 	//! Point a partition at another location. 'partition' is the partition as fetched; it is rewritten from the
 	//! Partition it carries, nothing is fetched again.
 	static void SetPartitionLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,

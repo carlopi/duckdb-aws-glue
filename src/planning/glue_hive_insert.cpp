@@ -10,6 +10,7 @@
 #include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/function/function_binder.hpp"
+#include "duckdb/function/scalar/generic_functions.hpp"
 #include "duckdb/function/scalar/string_functions.hpp"
 #include "duckdb/planner/expression/bound_case_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
@@ -148,6 +149,7 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 	auto &glue_catalog = existing_table->catalog.Cast<GlueCatalog>();
 	auto partitions = GlueAPI::GetPartitions(context, glue_catalog, table_info.schema_name, table_info.name);
 	auto result = make_uniq<BoundCaseExpression>(LogicalType::VARCHAR);
+	vector<pair<string, vector<string>>> custom_directories;
 	for (auto &partition : partitions) {
 		if (partition.values.size() != partition_columns.size()) {
 			throw InvalidInputException("Partition [%s] of Hive table '%s' has %d values, but the table has %d "
@@ -187,7 +189,24 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 		} else {
 			check.then_expr = make_uniq<BoundConstantExpression>(Value(relative_path));
 			partition_directories.emplace(location + "/" + relative_path, partition.values);
+			custom_directories.emplace_back(relative_path, partition.values);
 		}
+		result->CaseChecksMutable().push_back(std::move(check));
+	}
+	// after the checks of the existing partitions: a new partition whose own directory is the location of an existing
+	// one would be written there and read back as that partition
+	for (auto &custom : custom_directories) {
+		vector<unique_ptr<Expression>> message;
+		message.push_back(make_uniq<BoundConstantExpression>(Value(StringUtil::Format(
+		    "INSERT into Hive table '%s.%s' is not supported: a new partition would be written to '%s', the location "
+		    "of partition [%s], and read back as that partition",
+		    table_info.schema_name, table_info.name, custom.first, StringUtil::Join(custom.second, ", ")))));
+		BoundCaseCheck check;
+		check.when_expr = BoundComparisonExpression::Create(ExpressionType::COMPARE_EQUAL, hive_path->Copy(),
+		                                                    make_uniq<BoundConstantExpression>(Value(custom.first)));
+		check.then_expr = BoundCastExpression::AddCastToType(
+		    context, function_binder.BindScalarFunction(ErrorFun::GetFunction(), std::move(message)),
+		    LogicalType::VARCHAR);
 		result->CaseChecksMutable().push_back(std::move(check));
 	}
 	if (result->CaseChecks().empty()) {
