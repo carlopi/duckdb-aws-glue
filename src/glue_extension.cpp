@@ -10,6 +10,7 @@
 #include "catalog/glue_attach.hpp"
 #include "functions/glue_functions.hpp"
 #include "grammar/glue_grammar.hpp"
+#include "planning/stats/hive_stats.hpp"
 #include "api/glue_api.hpp"
 #include "api/glue_http_client.hpp"
 #include "duckdb/main/extension_helper.hpp"
@@ -108,7 +109,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "its exact row count and each column's min, max and NULLs, from the footers of all of "
 	                          "them; a scan of more files gives an estimate and no column statistics. 0 turns it "
 	                          "off. Default 16.",
-	                          LogicalType::UBIGINT, Value::UBIGINT(16));
+	                          LogicalType::UBIGINT, Value::UBIGINT(HIVE_FOOTER_STATISTICS_DEFAULT_MAX_FILES));
 
 	config.AddExtensionOption("hive_csv_parallel",
 	                          "Read each file of an OpenCSVSerde table with several threads when a scan has at most "

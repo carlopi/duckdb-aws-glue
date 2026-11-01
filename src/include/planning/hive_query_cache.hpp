@@ -27,8 +27,7 @@ struct HiveTableSampleEntry {
 	shared_ptr<const HiveTableSample> sample DUCKDB_GUARDED_BY(lock);
 };
 
-//! The footer of a data file, read once per query for the row-count sample and the column statistics of every scan
-//! of the file
+//! The footer of a data file, read once per query for every scan of the file
 struct HiveFileFooterEntry {
 	annotated_mutex lock;
 	//! Null until the first scan that needs it reads it

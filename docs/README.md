@@ -121,9 +121,9 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   A data column of an unpartitioned parquet table of at most `hive_footer_statistics_max_files` (default 16) files
   gets its minimum, maximum and NULLs merged from the footers of all of them, read once per query, at the same time,
   with the scan's reader options and shared with the row count; `0` turns them and the count off. A column that
-  some file lacks, or stores as another type than the table declares, gets none, as do the data columns of
-  partitioned, csv, json and avro tables. The optimizer prunes on these statistics and orders joins by them: the
-  minimum and maximum of a dimension's key let it see how much a join on that key keeps.
+  some file with rows lacks, or stores as another type than the table declares, gets none, as do the data columns
+  of partitioned, csv, json and avro tables; an empty file is skipped. The optimizer prunes on these statistics and
+  orders joins by them: the minimum and maximum of a dimension's key let it see how much a join on that key keeps.
 - The Glue table definition and the partition list are fetched once per query and table, however often the
   query scans the table.
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched

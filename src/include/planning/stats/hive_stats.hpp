@@ -11,6 +11,9 @@ namespace duckdb {
 //! bytes of a table are known from the listing alone, without opening anything
 optional_idx ListedFileSize(const OpenFileInfo &file);
 
+//! The default of hive_footer_statistics_max_files
+constexpr idx_t HIVE_FOOTER_STATISTICS_DEFAULT_MAX_FILES = 16;
+
 class BaseStatistics;
 
 //! Cardinality of a Hive scan: the files listed for the table, measured once per query, scaled to the partitions read

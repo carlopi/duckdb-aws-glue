@@ -70,8 +70,61 @@ SELECT stats(i) FROM fs_flat() LIMIT 1;
 ----
 {'has_no_null': true, 'has_null': true}
 
+# the bound is inclusive, and the largest one does not wrap around to off
+statement ok
+SET hive_footer_statistics_max_files = 2;
+
+query I
+SELECT stats(i) FROM fs_flat() LIMIT 1;
+----
+{'has_no_null': true, 'has_null': false, 'max': 20, 'min': 1}
+
+statement ok
+SET hive_footer_statistics_max_files = 18446744073709551615;
+
+query I
+SELECT stats(i) FROM fs_flat() LIMIT 1;
+----
+{'has_no_null': true, 'has_null': false, 'max': 20, 'min': 1}
+
 statement ok
 RESET hive_footer_statistics_max_files;
+
+# an empty file has no statistics, and holds no values the others' bounds must cover: it is skipped
+statement ok
+COPY (SELECT i::BIGINT AS i FROM range(1, 11) t(i)) TO '{TEST_DIR}/fs_empty_file' (FORMAT parquet, PER_THREAD_OUTPUT true);
+
+statement ok
+COPY (SELECT 1::BIGINT AS i LIMIT 0) TO '{TEST_DIR}/fs_empty_file/empty.parquet' (FORMAT parquet);
+
+query I
+SELECT stats(i) FROM hive_scan('{TEST_DIR}/fs_empty_file', schema := {i: 'BIGINT'}) LIMIT 1;
+----
+{'has_no_null': true, 'has_null': false, 'max': 10, 'min': 1}
+
+query II
+EXPLAIN SELECT i FROM hive_scan('{TEST_DIR}/fs_empty_file', schema := {i: 'BIGINT'});
+----
+physical_plan	<REGEX>:.*Hive Scan.*~10 rows.*
+
+query I
+SELECT count(*) FROM hive_scan('{TEST_DIR}/fs_empty_file', schema := {i: 'BIGINT'}) WHERE i > 5;
+----
+5
+
+# a file's column name is matched to the table's ignoring case, as the scan matches it
+statement ok
+COPY (SELECT i::BIGINT AS "ID" FROM range(1, 4) t(i)) TO '{TEST_DIR}/fs_case' (FORMAT parquet, PER_THREAD_OUTPUT true);
+
+query I
+SELECT stats(id) FROM hive_scan('{TEST_DIR}/fs_case', schema := {id: 'BIGINT'}) LIMIT 1;
+----
+{'has_no_null': true, 'has_null': false, 'max': 3, 'min': 1}
+
+query I
+SELECT count(*) FROM hive_scan('{TEST_DIR}/fs_case', schema := {id: 'BIGINT'}) WHERE id > 2;
+----
+1
 
 # the row counts of the footers add up to the scan's exact count, which is also its max, so a LIMIT above it is
 # dropped. 1 row in one file and 3 in the other, which the sample (the largest file's rows times the files) puts at 6
