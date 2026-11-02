@@ -70,7 +70,7 @@ SELECT stats(i) FROM fs_flat() LIMIT 1;
 ----
 {'has_no_null': true, 'has_null': true}
 
-# the bound is inclusive, and the largest one does not wrap around to off
+# the bound is inclusive, and at most 25
 statement ok
 SET hive_footer_statistics_max_files = 2;
 
@@ -80,15 +80,30 @@ SELECT stats(i) FROM fs_flat() LIMIT 1;
 {'has_no_null': true, 'has_null': false, 'max': 20, 'min': 1}
 
 statement ok
-SET hive_footer_statistics_max_files = 18446744073709551615;
+SET hive_footer_statistics_max_files = 25;
 
 query I
 SELECT stats(i) FROM fs_flat() LIMIT 1;
 ----
 {'has_no_null': true, 'has_null': false, 'max': 20, 'min': 1}
 
+statement error
+SET hive_footer_statistics_max_files = 26;
+----
+<REGEX>:.*hive_footer_statistics_max_files is at most 25, not 26.*
+
+query I
+SELECT current_setting('hive_footer_statistics_max_files');
+----
+25
+
 statement ok
 RESET hive_footer_statistics_max_files;
+
+query I
+SELECT current_setting('hive_footer_statistics_max_files');
+----
+16
 
 # an empty file has no statistics, and holds no values the others' bounds must cover: it is skipped
 statement ok
@@ -219,6 +234,12 @@ query II
 EXPLAIN SELECT i FROM hive_scan('{TEST_DIR}/fs_unreadable', schema := {i: 'BIGINT'}) LIMIT 100;
 ----
 physical_plan	<REGEX>:.*Limit: 100.*
+
+# nor column statistics: the readable file's alone would let this filter empty the scan without reading the other
+statement error
+SELECT count(*) FROM hive_scan('{TEST_DIR}/fs_unreadable', schema := {i: 'BIGINT'}) WHERE i > 100;
+----
+<REGEX>:.*No magic bytes found at end of file.*garbage\.parquet.*
 
 statement error
 SELECT i FROM hive_scan('{TEST_DIR}/fs_unreadable', schema := {i: 'BIGINT'});

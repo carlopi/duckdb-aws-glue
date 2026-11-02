@@ -8,7 +8,7 @@
 #include "core/glue_info.hpp"
 
 namespace duckdb {
-struct HiveFileFooter;
+class BaseUnionData;
 struct HiveScanInfo;
 struct HiveTableSample;
 
@@ -27,16 +27,18 @@ struct HiveTableSampleEntry {
 	shared_ptr<const HiveTableSample> sample DUCKDB_GUARDED_BY(lock);
 };
 
-//! The footer of a data file, read once per query for every scan of the file
+//! The footer of a parquet file, read once per query for every scan of the file
 struct HiveFileFooterEntry {
 	annotated_mutex lock;
-	//! Null until the first scan that needs it reads it
-	shared_ptr<const HiveFileFooter> footer DUCKDB_GUARDED_BY(lock);
+	bool read DUCKDB_GUARDED_BY(lock) = false;
+	//! Null when the footer could not be read
+	shared_ptr<BaseUnionData> footer DUCKDB_GUARDED_BY(lock);
 };
 
 //! What the running query learned about the tables it scans, dropped when the query ends: the partitions of a table
 //! (asked for once however often the query scans it), the recursive listings of directories (shared by the estimate and
-//! every scan listing the same directory), the table samples and the footers of data files
+//! every scan listing the same directory), the table samples, and the parquet footers planning read: the sampled file
+//! of every table, and every file of a small unpartitioned one
 class HiveQueryCache : public ClientContextState {
 public:
 	static shared_ptr<HiveQueryCache> Get(ClientContext &context);

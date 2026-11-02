@@ -10,7 +10,7 @@
 #include "catalog/glue_attach.hpp"
 #include "functions/glue_functions.hpp"
 #include "grammar/glue_grammar.hpp"
-#include "planning/stats/hive_stats.hpp"
+#include "planning/stats/hive_footer_statistics.hpp"
 #include "api/glue_api.hpp"
 #include "api/glue_http_client.hpp"
 #include "duckdb/main/extension_helper.hpp"
@@ -35,6 +35,13 @@ public:
 		create_transaction_manager = CreateTransactionManager;
 	}
 };
+
+static void SetHiveFooterStatisticsMaxFiles(ClientContext &context, SetScope scope, Value &parameter) {
+	if (!parameter.IsNull() && UBigIntValue::Get(parameter) > HIVE_FOOTER_STATISTICS_MAX_FILES_LIMIT) {
+		throw InvalidInputException("hive_footer_statistics_max_files is at most %d, not %d",
+		                            HIVE_FOOTER_STATISTICS_MAX_FILES_LIMIT, UBigIntValue::Get(parameter));
+	}
+}
 
 static void InitAWSAPI() {
 	// Should only be called once, and databases can load the extension concurrently
@@ -108,8 +115,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "An unpartitioned parquet scan that reads at most this many files gives the optimizer "
 	                          "its exact row count and each column's min, max and NULLs, from the footers of all of "
 	                          "them; a scan of more files gives an estimate and no column statistics. 0 turns it "
-	                          "off. Default 16.",
-	                          LogicalType::UBIGINT, Value::UBIGINT(HIVE_FOOTER_STATISTICS_DEFAULT_MAX_FILES));
+	                          "off. Default 16, at most 25.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(HIVE_FOOTER_STATISTICS_DEFAULT_MAX_FILES),
+	                          SetHiveFooterStatisticsMaxFiles);
 
 	config.AddExtensionOption("hive_csv_parallel",
 	                          "Read each file of an OpenCSVSerde table with several threads when a scan has at most "
