@@ -19,6 +19,8 @@
 # fails with the Glue error scripts/glue_fault_proxy.py assigns to that prefix, and CreateDatabase / CreateTable on a
 # fault_already_exists* database, which is carried out and then answered with AlreadyExistsException (a lost race),
 # and UpdateTable on a fault_concurrent_update* database, which another client's update precedes (a lost update).
+# BatchCreatePartition is delayed on a fault_slow_partitions* database (a timeout lands during registration) and, on a
+# fault_recreated_during_write* database, finds the table dropped and created again by another client and then fails.
 # 'link-proxy' (port 5557, GLUE_LINK_PROXY_ENDPOINT) forwards to moto as Glue answers through a database resource link
 # link_db whose target is target_db (scripts/resource_link_proxy.py).
 # Ports are published on 127.0.0.1 only, so the servers are not reachable from other machines.

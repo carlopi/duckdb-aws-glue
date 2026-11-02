@@ -443,6 +443,23 @@ void GlueAPI::DeleteTable(ClientContext &context, const std::shared_ptr<Aws::Glu
 	}
 }
 
+optional_idx GlueAPI::GetTableCreateTime(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
+                                         const string &database_name, const string &table_name) {
+	Aws::Glue::Model::GetTableRequest request;
+	SetCatalogId(request, catalog);
+	request.SetDatabaseName(database_name);
+	request.SetName(table_name);
+	auto outcome = client->GetTable(request);
+	if (!outcome.IsSuccess()) {
+		if (IsEntityNotFound(outcome)) {
+			return optional_idx();
+		}
+		ThrowGlueError(outcome, StringUtil::Format("GetTable '%s.%s'", database_name, table_name));
+	}
+	auto create_time_ms = ToTableInfo(outcome.GetResult().GetTable(), database_name).create_time_ms;
+	return optional_idx(create_time_ms > 0 ? static_cast<idx_t>(create_time_ms) : idx_t(0));
+}
+
 void GlueAPI::DeleteTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                           const string &table_name) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);

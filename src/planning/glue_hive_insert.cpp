@@ -622,10 +622,11 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 			}
 			registered = &created;
 		}
-		// a cancel during registration would fail the statement with its rows in the table: undo the write instead
-		context.InterruptCheck();
+		// a cancel or timeout during registration would fail the statement with its rows in the table: undo the write
+		// instead. BlockingInterruptCheck: InterruptCheck only looks at the deadline every 256 calls
+		context.BlockingInterruptCheck();
 		GlueAPI::BatchCreatePartitions(context, catalog, *registered, to_register);
-		context.InterruptCheck();
+		context.BlockingInterruptCheck();
 	} catch (std::exception &ex) {
 		// Undo the INSERT by deleting the files it wrote, so that running it again does not add its rows twice. The
 		// partitions it registered stay, empty: another INSERT may have added rows to them in the meantime.

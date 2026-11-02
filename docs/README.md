@@ -183,9 +183,13 @@ their codec themselves.
   id (a UUIDv7) per statement. The write is registered with the Glue transaction when it starts and completed when
   its partitions are registered; a write that is still registered when the transaction ends belongs to a statement
   that failed, and the rollback deletes the files named after its write and, for `CREATE TABLE ... AS`, the Glue
-  table it created, so the statement can be run again. This is best effort: a step that fails is logged as a
-  warning, and nothing is cleaned up if the process dies. Other queries can read the files of an insert before it
-  finishes.
+  table it created, so the statement can be run again. To find the files, the rollback lists every object below the
+  table's location, which takes one LIST request per 1,000 objects; it lists nothing, and deletes nothing, if the
+  location contains a glob character (`*`, `?`, `[`). A table `CREATE TABLE ... AS` created is kept if it holds files
+  of another writer, or if another client dropped and created it again while the statement ran. This is best effort:
+  a step that fails is logged as a warning (`CALL enable_logging(level := 'warning')` shows it). If the process
+  dies, nothing is cleaned up: the files stay, and the rows in them appear once their partition is registered, by a
+  later `INSERT`, `MSCK REPAIR` or a crawler. Other queries can read the files of an insert before it finishes.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults or collations), `DROP COLUMN` (not the last data
   column, not a partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` (no collations) update the Glue
   definition with UpdateTable.

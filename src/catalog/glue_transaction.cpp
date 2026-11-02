@@ -34,8 +34,25 @@ void GlueTransaction::Start() {
 }
 
 void GlueTransaction::Commit() {
-	// a write that has not completed at a commit belongs to a statement that did not finish either
-	UndoHiveWrites();
+	// a write still here at a commit is a bug, not a failed statement: its files may be in the table, so they stay
+	vector<unique_ptr<GlueHiveWrite>> writes;
+	{
+		lock_guard<mutex> guard(hive_writes_lock);
+		writes = std::move(hive_writes);
+		hive_writes.clear();
+	}
+	if (!writes.empty()) {
+		auto client_context = context.lock();
+		if (client_context) {
+			for (auto &write : writes) {
+				DUCKDB_LOG_WARNING(*client_context,
+				                   "A write into Hive table '%s.%s' had not completed when its transaction committed; "
+				                   "its files are kept",
+				                   write->database_name, write->table_name);
+			}
+		}
+		D_ASSERT(false);
+	}
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
 		transaction_state = GlueTransactionState::TRANSACTION_FINISHED;
 	}
@@ -98,7 +115,16 @@ void GlueTransaction::UndoHiveWrites() {
 
 void GlueTransaction::UndoHiveWrite(ClientContext &context, GlueCatalog &catalog, GlueHiveWrite &write) {
 	auto table = write.database_name + "." + write.table_name;
-	if (!write.files_deleted) {
+	// whether the table holds files of another writer, which a dropped table would leave behind unread
+	bool others_files = false;
+	bool listed = false;
+	if (FileSystem::HasGlob(write.location)) {
+		// the listing below would read the location as a pattern
+		DUCKDB_LOG_WARNING(context,
+		                   "Could not list the location of Hive table '%s' to undo a failed write: '%s' contains a "
+		                   "glob character",
+		                   table, write.location);
+	} else if (!write.files_deleted || write.created_table_schema) {
 		try {
 			// the database's file system, not one that stops at the interrupt the failed query set to end its pipelines
 			auto &fs = DatabaseInstance::GetDatabase(context).GetFileSystem();
@@ -109,9 +135,12 @@ void GlueTransaction::UndoHiveWrite(ClientContext &context, GlueCatalog &catalog
 				auto name = file.path.substr(file.path.find_last_of('/') + 1);
 				if (StringUtil::StartsWith(name, prefix)) {
 					written_files.push_back(file.path);
+				} else {
+					others_files = true;
 				}
 			}
-			if (!written_files.empty()) {
+			listed = true;
+			if (!write.files_deleted && !written_files.empty()) {
 				fs.RemoveFiles(written_files);
 			}
 		} catch (std::exception &ex) {
@@ -119,14 +148,33 @@ void GlueTransaction::UndoHiveWrite(ClientContext &context, GlueCatalog &catalog
 			                   ErrorData(ex).RawMessage());
 		}
 	}
-	if (write.created_table_schema) {
-		try {
-			GlueAPI::DeleteTable(context, write.client, catalog, write.database_name, write.table_name);
-			write.created_table_schema->tables.RemoveEntry(write.table_name);
-		} catch (std::exception &ex) {
-			DUCKDB_LOG_WARNING(context, "Could not drop Hive table '%s' after CREATE TABLE AS failed: %s", table,
-			                   ErrorData(ex).RawMessage());
+	if (!write.created_table_schema) {
+		return;
+	}
+	if (!listed || others_files) {
+		// another writer's files would be left in a table nobody reads: keep the table
+		DUCKDB_LOG_WARNING(context, "Kept Hive table '%s' after CREATE TABLE AS failed: %s", table,
+		                   listed ? "it holds files another writer added" : "its location could not be listed");
+		return;
+	}
+	try {
+		if (write.created_table_time.IsValid()) {
+			auto create_time =
+			    GlueAPI::GetTableCreateTime(write.client, catalog, write.database_name, write.table_name);
+			if (create_time.IsValid() && create_time.GetIndex() != write.created_table_time.GetIndex()) {
+				// dropped and created again by someone else while the statement ran: not ours to drop
+				DUCKDB_LOG_WARNING(context,
+				                   "Kept Hive table '%s' after CREATE TABLE AS failed: it was created again by another "
+				                   "client while the statement ran",
+				                   table);
+				return;
+			}
 		}
+		GlueAPI::DeleteTable(context, write.client, catalog, write.database_name, write.table_name);
+		write.created_table_schema->tables.RemoveEntry(write.table_name);
+	} catch (std::exception &ex) {
+		DUCKDB_LOG_WARNING(context, "Could not drop Hive table '%s' after CREATE TABLE AS failed: %s", table,
+		                   ErrorData(ex).RawMessage());
 	}
 }
 

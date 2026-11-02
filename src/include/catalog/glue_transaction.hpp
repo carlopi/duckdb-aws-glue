@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -166,6 +167,9 @@ struct GlueHiveWrite {
 	//! transaction has ended, too late to look up the secret)
 	optional_ptr<GlueSchemaEntry> created_table_schema;
 	std::shared_ptr<Aws::Glue::GlueClient> client;
+	//! The CreateTime of the table it created, if it could be fetched: a table with another one was created again by
+	//! someone else, and is not dropped
+	optional_idx created_table_time;
 	//! The statement deleted its files itself (a failed partition registration does), so the undo need not look
 	bool files_deleted = false;
 };
