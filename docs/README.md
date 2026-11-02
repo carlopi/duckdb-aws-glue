@@ -240,11 +240,10 @@ this connection's cache: a write through it, a rollback, or DETACH.
 - A column in the SELECT can not start with the name of another catalog the view reads (`cat.db.t.col`,
   `* EXCLUDE (cat.db.t.col)`), or with its own catalog's name as a row reference (`cat.t`), even when that name is a
   table, alias or column: use a table alias with another name.
-- With `SET experimental_glue_view_enable_external_catalogs = true`, a view can also read tables of other kinds of
-  catalogs (e.g. Iceberg, Postgres, a DuckDB file). Such a table is stored as `"external:<type>:<alias>".<schema>.<table>`,
-  with the alias the catalog was attached under, so the view is tied to that alias: it reads wherever a catalog of that
-  type is attached under that alias, whichever catalog that is, and fails where none is. Reading needs no setting.
-  Catalogs in memory are refused.
+- With `SET experimental_glue_view_external_catalog_types = ['duckdb', 'iceberg']` (empty by default), views can also
+  read tables of catalogs of those types, stored as `"external:<type>:<alias>".<schema>.<table>` and read wherever a
+  catalog of that type is attached under that alias, never from one in memory, temporary, system or attached hidden. A
+  bare table name in a body written to Glue by other means is read from the view's own Glue database.
 - `SHOW [ALL] TABLES`, `duckdb_views()`, `information_schema.views` and `duckdb_columns()` list every view of a database,
   including views written by other engines. Only views written by DuckDB can be queried, replaced or dropped.
 - `DROP VIEW [IF EXISTS] db.v` deletes the view.
