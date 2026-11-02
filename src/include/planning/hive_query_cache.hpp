@@ -27,7 +27,7 @@ struct HiveTableSampleEntry {
 	shared_ptr<const HiveTableSample> sample DUCKDB_GUARDED_BY(lock);
 };
 
-//! The footer of a parquet file, read once per query for every scan of the file
+//! The footer of a parquet file planning read: a table's sampled file, or any file of a small unpartitioned table
 struct HiveFileFooterEntry {
 	annotated_mutex lock;
 	bool read DUCKDB_GUARDED_BY(lock) = false;
@@ -37,8 +37,7 @@ struct HiveFileFooterEntry {
 
 //! What the running query learned about the tables it scans, dropped when the query ends: the partitions of a table
 //! (asked for once however often the query scans it), the recursive listings of directories (shared by the estimate and
-//! every scan listing the same directory), the table samples, and the parquet footers planning read: the sampled file
-//! of every table, and every file of a small unpartitioned one
+//! every scan listing the same directory), the table samples and the parquet footers planning read
 class HiveQueryCache : public ClientContextState {
 public:
 	static shared_ptr<HiveQueryCache> Get(ClientContext &context);

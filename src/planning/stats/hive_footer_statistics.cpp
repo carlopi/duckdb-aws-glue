@@ -31,7 +31,8 @@ private:
 static idx_t FooterStatisticsMaxFiles(ClientContext &context) {
 	Value setting;
 	if (context.TryGetCurrentSetting("hive_footer_statistics_max_files", setting) && !setting.IsNull()) {
-		return setting.GetValue<idx_t>();
+		// SET checks the bound; DBConfig::SetOptionByName does not
+		return MinValue<idx_t>(setting.GetValue<idx_t>(), HIVE_FOOTER_STATISTICS_MAX_FILES_LIMIT);
 	}
 	return HIVE_FOOTER_STATISTICS_DEFAULT_MAX_FILES;
 }
@@ -140,7 +141,20 @@ unique_ptr<BaseStatistics> HiveParquetFooters::Statistics(const MultiFileColumnD
 			// an empty file has no statistics, and no values the merged bounds must cover
 			continue;
 		}
-		auto statistics = footer->GetStatistics(context, column.name);
+		unique_ptr<BaseStatistics> statistics;
+		try {
+			statistics = footer->GetStatistics(context, column.name);
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			if (error.Type() == ExceptionType::INTERRUPT) {
+				throw;
+			}
+			// costing must not fail a query: the scan reports a file it cannot read
+			DUCKDB_LOG_WARNING(context, "Could not read the statistics of column '%s' of '%s' of Hive table '%s': %s",
+			                   column.name.GetIdentifierName(), file.path, list.ScanInfo().Describe(),
+			                   error.RawMessage());
+			return nullptr;
+		}
 		if (!statistics || statistics->GetType() != column.type) {
 			return nullptr;
 		}

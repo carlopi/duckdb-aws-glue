@@ -92,6 +92,11 @@ SET hive_footer_statistics_max_files = 26;
 ----
 <REGEX>:.*hive_footer_statistics_max_files is at most 25, not 26.*
 
+statement error
+SET GLOBAL hive_footer_statistics_max_files = 26;
+----
+<REGEX>:.*hive_footer_statistics_max_files is at most 25, not 26.*
+
 query I
 SELECT current_setting('hive_footer_statistics_max_files');
 ----
@@ -245,6 +250,18 @@ statement error
 SELECT i FROM hive_scan('{TEST_DIR}/fs_unreadable', schema := {i: 'BIGINT'});
 ----
 <REGEX>:.*No magic bytes found at end of file.*garbage\.parquet.*
+
+# statistics DuckDB rejects (a column chunk of 0 values in a row group of 8 rows, from DuckDB's parquet-testing) give
+# the column none, and planning goes on: the scan reports the file
+query II
+EXPLAIN SELECT x FROM hive_scan('test/data/parquet_column_num_values_mismatch', schema := {x: 'INTEGER'});
+----
+physical_plan	<REGEX>:.*Hive Scan.*
+
+statement error
+SELECT x FROM hive_scan('test/data/parquet_column_num_values_mismatch', schema := {x: 'INTEGER'});
+----
+<REGEX>:.*metadata is corrupt. Column has 0 values but row group has 8 rows.*
 
 # a file without the column, which the scan reads as NULL
 statement ok

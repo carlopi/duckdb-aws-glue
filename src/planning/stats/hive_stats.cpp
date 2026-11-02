@@ -260,7 +260,7 @@ static shared_ptr<const HiveTableSample> SampleTable(ClientContext &context, con
 
 //! Cardinality of a Hive scan: the files listed for the table, measured once per query, scaled to the partitions
 //! this scan reads. Replaces a constant: without it a 40-row dimension table and a 200,000-row fact table cost the
-//! same, and csv and json are estimated at one row. A parquet scan within the footer bound is counted instead.
+//! same, and csv and json are estimated at one row.
 unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const FunctionData *bind_data_p) {
 	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
 	auto &hive_list = bind_data.file_list->Cast<HiveMultiFileList>();
