@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/enums/file_compression_type.hpp"
+#include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/vector.hpp"
@@ -11,6 +12,11 @@
 #include "core/readers/hive_json_options.hpp"
 
 namespace duckdb {
+
+//! A table / partition as the Glue SDK returned it, kept with the projection so that a write can be built from it
+//! instead of fetching the object again. Opaque outside api/, which alone defines them.
+struct GlueFetchedTable;
+struct GlueFetchedPartition;
 
 enum class GlueSortOrder : uint8_t { UNSORTED, ASCENDING, DESCENDING };
 
@@ -96,6 +102,8 @@ struct GlueTableInfo {
 	int64_t create_time_ms = 0;
 	//! The file format to create the table with (CreateHiveTable); for a fetched table use GetFileFormat()
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
+	//! The Table object this projection was made from; null for a definition not fetched from Glue
+	shared_ptr<const GlueFetchedTable> fetched;
 
 public:
 	bool IsView() const {
@@ -168,6 +176,7 @@ struct GlueViewInfo {
 	//! The bound output columns
 	vector<GlueColumn> columns;
 	bool secure = false;
+	bool has_column_alias_list = false;
 };
 
 //! A partition of a Hive table to register: the partition values (in partition key order) and its location
@@ -189,6 +198,8 @@ struct GluePartitionDetails : public GluePartitionInfo {
 	unordered_map<string, string> serde_parameters;
 	vector<GlueColumn> columns;
 	unordered_map<string, string> parameters;
+	//! The Partition object this projection was made from
+	shared_ptr<const GlueFetchedPartition> fetched;
 };
 
 } // namespace duckdb

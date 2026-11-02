@@ -31,6 +31,8 @@ public:
 
 	//! Build the catalog entry for a Glue table definition: a GlueView for a VIRTUAL_VIEW, else a GlueTable
 	unique_ptr<CatalogEntry> CreateEntry(const GlueTableInfo &table);
+	//! The definition a table or view entry was built from
+	static const GlueTableInfo &GetTableInfo(const CatalogEntry &entry);
 
 private:
 	void LoadEntries(ClientContext &context);
@@ -39,8 +41,6 @@ private:
 	void BulkLoadTableInfo(ClientContext &context, GlueTransactionCache &cache);
 	static bool BatchTableLookups(ClientContext &context);
 	static void SetTableTypeTag(GlueTable &entry);
-	//! The definition a table or view entry was built from
-	static const GlueTableInfo &GetTableInfo(const CatalogEntry &entry);
 	//! Move an entry out of the set; the transaction manager keeps it alive while a running statement may use it.
 	//! Called with entry_lock held.
 	void RetireEntry(const string &name);
