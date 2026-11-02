@@ -69,13 +69,13 @@ CALL glue_add_partition('my_datalake.default.custom_loc_errors', {part: 'x'},
 statement error
 INSERT INTO my_datalake.default.custom_loc_errors VALUES (1, 'x'), (2, 'y');
 ----
-<REGEX>:.*a new partition would be written to 'part=y', the location of partition \[x\], and read back as that partition.*
+<REGEX>:.*rows would be written to 'part=y', the location of partition \[x\], and read back as that partition.*
 
 # also when only the new partition is written
 statement error
 INSERT INTO my_datalake.default.custom_loc_errors VALUES (2, 'y');
 ----
-<REGEX>:.*a new partition would be written to 'part=y', the location of partition \[x\].*
+<REGEX>:.*rows would be written to 'part=y', the location of partition \[x\].*
 
 # the existing partition can still be written
 statement ok

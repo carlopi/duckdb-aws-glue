@@ -86,7 +86,10 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   layout. Files and directories named `_*` or `.*`, `*_$folder$` directory markers and objects the listing reports as
   zero bytes are skipped.
   When one partition's location lies inside another's,
-  a file belongs to the deepest one. A table without data files (just created) scans as empty.
+  a file belongs to the deepest one. A location two or more partitions are registered at is refused when a query
+  reads one of them and the location holds data files: Hive engines read such a file once for each partition, which
+  DuckDB does not. `s3a://` and `s3n://` locations name the same bucket and key as `s3://`, and a location is read as
+  registered, including a `//` in its path. A table without data files (just created) scans as empty.
 - A partitioned table with Athena partition projection (`projection.enabled = true`) is refused on read and write
   rather than scanned: Athena derives its partitions from the `projection.*` parameters and ignores the registered
   ones, which such a table usually has none of, so a scan would silently read nothing. To read it, set
@@ -164,8 +167,9 @@ their codec themselves.
   string, `\N` for LazySimpleSerDe unless `serialization.null.format` says otherwise, and at most one header line) and register new partition directories in Glue with
   BatchCreatePartition. New partitions get `<key>=<value>` directories; rows of an existing partition are written to
   its registered location, which may be any directory below the table location (e.g. `<table>/2024/01`). Inserting
-  into a partition whose location is not below the table location fails; the rows of other partitions can still be
-  inserted. Glue errors on single partitions that may pass (throttling, internal errors) are retried; when Glue
+  into a partition whose location is not below the table location, or whose location has an empty segment (`//`) DuckDB
+  can not write, fails, and so does inserting rows whose directory is the location of another partition; the rows of
+  other partitions can still be inserted. Glue errors on single partitions that may pass (throttling, internal errors) are retried; when Glue
   still refuses a partition, the write is rolled back by deleting the files it wrote (the partitions it registered
   stay, empty), so the statement can be run again without adding its
   rows twice. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a

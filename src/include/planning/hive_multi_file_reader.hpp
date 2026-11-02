@@ -76,6 +76,9 @@ private:
 //! Whether a listed file below 'prefix' is a data file of a Hive table: not hidden (a path component starting with
 //! '_' or '.', as Spark's _SUCCESS), not a directory marker (_$folder$) and not empty
 bool IsDataFile(const OpenFileInfo &file, const string &prefix);
+//! A location to compare with other locations: s3a://, s3n:// and S3:// name the same bucket and key as s3://, and a
+//! trailing slash is dropped. Only for comparing; files are listed and read at the location as registered.
+string ComparableLocation(const string &location);
 
 //! The data files of a Hive table, listed lazily: nothing is listed until the scan asks for files, and the filters on
 //! the partition columns are applied to the partition values first (HiveMultiFileReader::ComplexFilterPushdown), so
@@ -131,13 +134,14 @@ private:
 	vector<OpenFileInfo> SampleRootPartitions(const vector<idx_t> &partitions) const;
 	//! Index every registered partition location, including pruned ones, so attribution does not depend on filters
 	void BuildPartitionLocations() const;
-	//! Refuse to read a partition whose location another partition is registered at too
-	void ThrowIfLocationShared(idx_t partition_index) const;
+	//! Refuse to read a file attributed to 'owner' when its location is one two or more partitions are registered at
+	//! and one of them is in 'reading'
+	void ThrowIfLocationShared(idx_t owner, const unordered_set<idx_t> &reading) const;
 	//! The partition of the deepest registered location containing the file, searching no shorter than
-	//! 'min_directory_size'
+	//! 'min_directory_size' characters of its ComparableLocation
 	optional_idx OwningPartition(const string &file_path, idx_t min_directory_size) const;
-	//! Add a listed file of the partition unless this list already has it (two partitions sharing a location: the
-	//! file belongs to the first). Called with HiveScanInfo::file_partitions_lock held.
+	//! Add a listed file of the partition unless this list already has it. Called with
+	//! HiveScanInfo::file_partitions_lock held.
 	void AddFile(OpenFileInfo file, idx_t partition_index) const;
 
 private:
@@ -154,8 +158,12 @@ private:
 	mutable idx_t next_job = 0;
 	//! The paths already in 'expanded_files'
 	mutable unordered_set<string> listed_files;
-	//! Registered partition location (without trailing '/') to its index in HiveScanInfo::Partitions()
+	//! ComparableLocation of a registered partition location to its index in HiveScanInfo::Partitions(): the first
+	//! partition registered there
 	mutable unordered_map<string, idx_t> partition_by_location;
+	//! For a location two or more partitions are registered at: the first of them (its entry in partition_by_location,
+	//! which files there are attributed to) to all of them
+	mutable unordered_map<idx_t, vector<idx_t>> shared_locations;
 	mutable bool partition_locations_built = false;
 };
 
