@@ -604,7 +604,18 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		to_register.push_back(entry.second);
 	}
 	try {
-		GlueAPI::BatchCreatePartitions(context, catalog, table_info.schema_name, table_info.name, to_register);
+		// an INSERT registers against the table definition it bound; a CREATE TABLE AS planned from the definition
+		// it was about to create, so the table is fetched as created
+		optional_ptr<const GlueTableInfo> registered = &table_info;
+		GlueTableInfo created;
+		if (!table_info.fetched) {
+			if (!GlueAPI::GetTable(context, catalog, table_info.schema_name, table_info.name, created)) {
+				throw CatalogException("Table \"%s.%s\" was created but could not be fetched afterwards",
+				                       table_info.schema_name, table_info.name);
+			}
+			registered = &created;
+		}
+		GlueAPI::BatchCreatePartitions(context, catalog, *registered, to_register);
 	} catch (std::exception &ex) {
 		// Undo the INSERT by deleting the files it wrote, so that running it again does not add its rows twice. The
 		// partitions it registered stay, empty: another INSERT may have added rows to them in the meantime.

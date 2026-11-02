@@ -317,7 +317,7 @@ query.
 
 | function | Hive statement |
 |----------|------------------|
-| `glue_partitions('cat.db.t')` | `SHOW PARTITIONS`: one row per registered partition, a typed column per partition key plus `location` |
+| `glue_partitions('cat.db.t')` | `SHOW PARTITIONS`: one row per registered partition, a typed column per partition key plus `location` (numbered like a duplicate result column, `location_1`, when a partition key is called `location`) |
 | `glue_get_partition_response('cat.db.t', {dt: '2016-05-14', country: 'IN'})` | `DESCRIBE FORMATTED ... PARTITION (...)`: the partition's location, SerDe, columns and parameters, and its complete Glue definition in `response` |
 | `CALL glue_add_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, location := 's3://...', if_not_exists := false)` | `ALTER TABLE ADD [IF NOT EXISTS] PARTITION (...) [LOCATION ...]`; without `location` the partition lives at `<table location>/dt=2016-05-14/country=IN` |
 | `CALL glue_drop_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, if_exists := false)` | `ALTER TABLE DROP [IF EXISTS] PARTITION (...)`; the data files stay in S3 |
@@ -439,7 +439,9 @@ A config creates the S3 secret (`on_init`) and sets `GLUE_CATALOG_ID`, `GLUE_END
 which the tests use in their ATTACH; tests are skipped without a config (`require-env GLUE_CATALOG_ID`). Tests under
 `test/sql/cloud/` read tables of the live account that the tests do not create and only run with the cloud config.
 The local config also sets `GLUE_FAULT_ENDPOINT`: `scripts/glue_fault_proxy.py` in front of moto, which answers
-GetTables on a database named `fault_*` with a Glue error; tests that need it are skipped without it. It also sets
+GetTables on a database named `fault_access_denied*` / `fault_invalid_input*` with that Glue error, and carries out
+CreateDatabase / CreateTable on a `fault_already_exists*` database before answering AlreadyExistsException (what it
+creates differs from what was asked for); tests that need it are skipped without it. It also sets
 `GLUE_LINK_PROXY_ENDPOINT`: `scripts/resource_link_proxy.py` in front of moto, which answers for the database
 `link_db` as Glue does through a database resource link whose target is `target_db`.
 

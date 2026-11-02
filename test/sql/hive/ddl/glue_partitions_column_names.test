@@ -1,0 +1,69 @@
+# name: test/sql/hive/ddl/glue_partitions_column_names.test
+# description: glue_partitions() lists a table whose partition key is called location
+# group: [ddl]
+
+# glue_partitions() returns a typed column per partition key and then 'location'. A partition key may be called
+# location too; the key keeps its name and the listing's column is numbered the way DuckDB numbers duplicate result
+# columns. Column names compare case-insensitively.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gp_cn_location;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gp_cn_data_column;
+
+# ===========================================================================
+# partition keys called Location and LOCATION_1
+# ===========================================================================
+statement ok
+CREATE TABLE my_datalake.default.gp_cn_location (id INTEGER, "Location" VARCHAR, "LOCATION_1" VARCHAR) PARTITIONED BY ("Location", "LOCATION_1");
+
+statement ok
+CALL glue_add_partition('my_datalake.default.gp_cn_location', {"Location": 'us', "LOCATION_1": 'west'});
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM glue_partitions('my_datalake.default.gp_cn_location'));
+----
+Location	VARCHAR
+LOCATION_1	VARCHAR
+location_2	VARCHAR
+
+# the key columns hold the values, the listing column the S3 location
+query III
+SELECT "Location", "LOCATION_1", location_2 LIKE '%/gp_cn_location/Location=us/LOCATION_1=west' FROM glue_partitions('my_datalake.default.gp_cn_location');
+----
+us	west	true
+
+# ===========================================================================
+# a data column called location is not a partition key and does not take part
+# ===========================================================================
+statement ok
+CREATE TABLE my_datalake.default.gp_cn_data_column (id INTEGER, location VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+CALL glue_add_partition('my_datalake.default.gp_cn_data_column', {dt: 'd1'});
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM glue_partitions('my_datalake.default.gp_cn_data_column'));
+----
+dt	VARCHAR
+location	VARCHAR
+
+statement ok
+DROP TABLE my_datalake.default.gp_cn_location;
+
+statement ok
+DROP TABLE my_datalake.default.gp_cn_data_column;
