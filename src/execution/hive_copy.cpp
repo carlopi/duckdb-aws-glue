@@ -57,6 +57,12 @@ static void ThrowIfLocationInUse(ClientContext &context, GlueSchemaEntry &schema
 
 static void ClearLocation(ClientContext &context, GlueSchemaEntry &schema, const GlueTableInfo &table_info,
                           const string &location, bool overwrite) {
+	// the location is listed with a glob, which would miss its own files and match those of other prefixes
+	if (location.find_first_of("*?[") != string::npos) {
+		throw InvalidInputException("CREATE TABLE AS for Hive table '%s.%s' is not supported: its location '%s' "
+		                            "contains a glob character (*, ? or [)",
+		                            table_info.schema_name, table_info.name, location);
+	}
 	auto &fs = FileSystem::GetFileSystem(context);
 	auto listing = fs.GlobFileList(location + "/**", FileGlobOptions::ALLOW_EMPTY);
 	vector<string> data_files;
