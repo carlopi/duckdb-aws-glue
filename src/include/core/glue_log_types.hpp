@@ -3,8 +3,6 @@
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/logging/log_type.hpp"
 
-#include <chrono>
-
 namespace duckdb {
 class DatabaseInstance;
 struct CreateMacroInfo;
@@ -42,17 +40,5 @@ public:
 void RegisterGlueLogTypes(DatabaseInstance &db);
 //! The Glue requests in the HTTP log: glue_requests()
 unique_ptr<CreateMacroInfo> GetGlueRequestsMacro();
-
-class GlueLogTimer {
-public:
-	GlueLogTimer() : start(std::chrono::steady_clock::now()) {
-	}
-	double ElapsedMillis() const {
-		return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-	}
-
-private:
-	std::chrono::steady_clock::time_point start;
-};
 
 } // namespace duckdb

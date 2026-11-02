@@ -1,5 +1,6 @@
 #include "planning/stats/hive_stats.hpp"
 
+#include "duckdb/common/profiler.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
@@ -266,13 +267,14 @@ static shared_ptr<const HiveTableSample> SampleTable(ClientContext &context, con
 	auto entry = HiveQueryCache::Get(context)->GetSample(info.catalog_name + "." + info.Describe());
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
 	if (!entry->sample) {
-		GlueLogTimer timer;
+		Profiler timer;
+		timer.Start();
 		entry->sample = make_shared_ptr<const HiveTableSample>(MeasureTable(context, bind_data, hive_list));
 		GlueScanEvent event(info.Describe(), info.scan_id, "sample");
 		if (entry->sample->listed) {
 			event.files = entry->sample->files;
 		}
-		event.duration_ms = timer.ElapsedMillis();
+		event.duration_ms = timer.Elapsed() * 1000;
 		DUCKDB_LOG(context, GlueScanLogType, event);
 	}
 	return entry->sample;

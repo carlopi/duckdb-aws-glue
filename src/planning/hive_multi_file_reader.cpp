@@ -3,6 +3,7 @@
 #include "planning/stats/hive_stats.hpp"
 #include "core/glue_log_types.hpp"
 
+#include "duckdb/common/profiler.hpp"
 #include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
@@ -91,11 +92,12 @@ shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::Partitions(ClientConte
 			// unpartitioned, or a hive_scan that was given none
 			partitions = make_shared_ptr<const vector<GluePartitionInfo>>();
 		} else {
-			GlueLogTimer timer;
+			Profiler timer;
+			timer.Start();
 			partitions = GetTablePartitions(context, *this);
 			GlueScanEvent event(Describe(), scan_id, "partitions");
 			event.partitions = partitions->size();
-			event.duration_ms = timer.ElapsedMillis();
+			event.duration_ms = timer.Elapsed() * 1000;
 			DUCKDB_LOG(context, GlueScanLogType, event);
 		}
 	}
@@ -384,7 +386,8 @@ bool HiveMultiFileList::ExpandNextPath() const {
 		return false;
 	}
 	auto &job = listing_jobs[next_job++];
-	GlueLogTimer timer;
+	Profiler timer;
+	timer.Start();
 	auto files_before = expanded_files.size();
 	string mode;
 	if (scan_info->partition_keys.empty()) {
@@ -406,7 +409,7 @@ bool HiveMultiFileList::ExpandNextPath() const {
 		event.partitions_read = job.partitions.size();
 	}
 	event.files = expanded_files.size() - files_before;
-	event.duration_ms = timer.ElapsedMillis();
+	event.duration_ms = timer.Elapsed() * 1000;
 	event.detail = mode;
 	DUCKDB_LOG(client_context, GlueScanLogType, event);
 	return true;
