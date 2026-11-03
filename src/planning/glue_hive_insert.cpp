@@ -191,7 +191,9 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 			auto message = StringUtil::Format(
 			    "Writing to Hive table '%s.%s' failed: partition [%s] declares column '%s' as '%s', but the table "
 			    "declares column '%s' as '%s'. The table schema changed after the partition was created, and "
-			    "inserting into a partition whose column types differ from the table's is not supported",
+			    "inserting into a partition whose column types differ from the table's is not supported: the new files "
+			    "would not match the types the partition declares. Change the partition's column types to the "
+			    "table's first, e.g. with Hive's ALTER TABLE ... PARTITION (...) CHANGE COLUMN",
 			    table_info.schema_name, table_info.name, StringUtil::Join(partition.values, ", "),
 			    partition_column.name, partition_column.type, table_column.name, table_column.type);
 			ErrorData error;
