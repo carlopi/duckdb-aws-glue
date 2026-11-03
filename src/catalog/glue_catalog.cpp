@@ -106,6 +106,19 @@ GlueSchemaSet &GlueCatalog::GetSchemas() {
 	return schemas;
 }
 
+static optional_ptr<CatalogEntry> OnExistingSchema(const CreateSchemaInfo &info, const string &schema_name,
+                                                   const string &catalog_name) {
+	switch (info.on_conflict) {
+	case OnCreateConflict::IGNORE_ON_CONFLICT:
+		return nullptr;
+	case OnCreateConflict::ERROR_ON_CONFLICT:
+		throw CatalogException("Schema with name \"%s\" already exists in Glue catalog \"%s\"", schema_name,
+		                       catalog_name);
+	default:
+		throw NotImplementedException("CREATE OR REPLACE SCHEMA is not supported for Glue catalogs");
+	}
+}
+
 optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
 	auto &context = transaction.GetContext();
 	ThrowIfInExplicitTransaction(context);
@@ -113,15 +126,7 @@ optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transact
 
 	auto existing = schemas.GetEntry(context, schema_name);
 	if (existing) {
-		switch (info.on_conflict) {
-		case OnCreateConflict::IGNORE_ON_CONFLICT:
-			return nullptr;
-		case OnCreateConflict::ERROR_ON_CONFLICT:
-			throw CatalogException("Schema with name \"%s\" already exists in Glue catalog \"%s\"", schema_name,
-			                       GetName().GetIdentifierName());
-		default:
-			throw NotImplementedException("CREATE OR REPLACE SCHEMA is not supported for Glue catalogs");
-		}
+		return OnExistingSchema(info, schema_name, GetName().GetIdentifierName());
 	}
 
 	GlueDatabaseInfo database;
@@ -130,7 +135,13 @@ optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transact
 	for (auto &option : GlueSchemaEntry::EvaluateOptions(context, info.options, "CREATE SCHEMA")) {
 		SetDatabaseOption(database, option.first, option.second);
 	}
-	GlueAPI::CreateDatabase(context, *this, database);
+	if (GlueAPI::CreateDatabase(context, *this, database) == GlueCreateOutcome::ALREADY_EXISTED) {
+		// another client created the database since the lookup above: take its entry
+		if (!schemas.GetEntry(context, schema_name)) {
+			throw CatalogException("Glue database \"%s\" exists but could not be fetched", schema_name);
+		}
+		return OnExistingSchema(info, schema_name, GetName().GetIdentifierName());
+	}
 
 	// re-fetch so the cached entry reflects what Glue stored
 	GlueDatabaseInfo created;
@@ -404,11 +415,19 @@ void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context) {
 	}
 }
 
+void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context, const char *function) {
+	if (!context.transaction.IsAutoCommit()) {
+		throw TransactionException(
+		    "%s changes Glue, which has no transactions, so it can not run inside a transaction: "
+		    "run it as a statement of its own, CALL %s(...), outside BEGIN ... COMMIT",
+		    function, function);
+	}
+}
+
 GlueTable &GlueCatalog::GetHiveTableForDML(ClientContext &context, TableCatalogEntry &table, const char *statement,
                                            GlueTableInfo &table_info) {
 	auto &glue_table = table.Cast<GlueTable>();
-	// the entry holds the definition this transaction looked up in Glue
-	table_info = glue_table.table_info;
+	table_info = glue_table.schema.Cast<GlueSchemaEntry>().DefinitionForWrite(context, glue_table);
 	auto format = table_info.GetFormat();
 	if (!format.IsHive()) {
 		throw NotImplementedException("%s on Glue table '%s' with type %s is not supported, only Hive tables can be "
@@ -440,11 +459,11 @@ GlueTable &GlueCatalog::GetHiveTableForDML(ClientContext &context, TableCatalogE
 	}
 	// Athena writes JSON only with the Hive JsonSerDe; OpenX properties (mapping.*, dots.in.keys) would not find the
 	// keys DuckDB writes
-	if (glue_table.table_info.GetSerDe() == HiveSerDe::OPENX_JSON) {
+	if (table_info.GetSerDe() == HiveSerDe::OPENX_JSON) {
 		throw NotImplementedException("%s into Glue table '%s' is not supported: the table uses the OpenX JSON SerDe "
 		                              "'%s', DuckDB writes JSON tables only with the Hive JsonSerDe "
 		                              "(org.apache.hive.hcatalog.data.JsonSerDe)",
-		                              statement, table.name.GetIdentifierName(), glue_table.table_info.serde_library);
+		                              statement, table.name.GetIdentifierName(), table_info.serde_library);
 	}
 	return glue_table;
 }

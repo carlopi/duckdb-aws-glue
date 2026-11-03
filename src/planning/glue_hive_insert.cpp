@@ -494,6 +494,12 @@ PhysicalOperator &GlueHiveInsert::PlanCreateTableAs(ClientContext &context, Phys
 
 	// no Glue call here: PREPARE and prepared statement rebinds plan more than once, the copy creates the table
 	auto &schema = op.schema.Cast<GlueSchemaEntry>();
+	if (op.info->Base().on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT &&
+	    GlueSchemaEntry::ParseCreateTableOptions(context, op.info->Base()).overwrite) {
+		// the files are deleted before the table is created, so a failed replace would leave neither
+		throw NotImplementedException("CREATE OR REPLACE TABLE ... AS with option 'overwrite' is not supported: its "
+		                              "files would be deleted before the table is replaced");
+	}
 	auto &catalog = schema.catalog.Cast<GlueCatalog>();
 	// Catalog::CreateTable would check this, but the copy creates the table through the schema entry
 	auto supported = catalog.SupportsCreateTable(*op.info);
@@ -604,7 +610,18 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		to_register.push_back(entry.second);
 	}
 	try {
-		GlueAPI::BatchCreatePartitions(context, catalog, table_info.schema_name, table_info.name, to_register);
+		// an INSERT registers against the table definition it bound; a CREATE TABLE AS planned from the definition
+		// it was about to create, so the table is fetched as created
+		optional_ptr<const GlueTableInfo> registered = &table_info;
+		GlueTableInfo created;
+		if (!table_info.fetched) {
+			if (!GlueAPI::GetTable(context, catalog, table_info.schema_name, table_info.name, created)) {
+				throw CatalogException("Table \"%s.%s\" was created but could not be fetched afterwards",
+				                       table_info.schema_name, table_info.name);
+			}
+			registered = &created;
+		}
+		GlueAPI::BatchCreatePartitions(context, catalog, *registered, to_register);
 	} catch (std::exception &ex) {
 		// Undo the INSERT by deleting the files it wrote, so that running it again does not add its rows twice. The
 		// partitions it registered stay, empty: another INSERT may have added rows to them in the meantime.

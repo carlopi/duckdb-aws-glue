@@ -192,7 +192,7 @@ static HiveTableSample MeasureTable(ClientContext &context, const MultiFileBindD
 			reading.insert(partition_indexes->begin(), partition_indexes->end());
 			auto partitions = info.Partitions(context);
 			for (idx_t i = 0; i < partitions->size(); i++) {
-				if (!info.PartitionStorageMismatch((*partitions)[i]).empty()) {
+				if (info.PartitionStorageMismatch((*partitions)[i]).HasError()) {
 					unreadable.insert(i);
 				}
 			}

@@ -19,6 +19,7 @@
 #include "duckdb/common/type_visitor.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/execution/operator/csv_scanner/csv_reader_options.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -51,6 +52,7 @@
 #include "duckdb/planner/bound_expression_sql_exporter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/sql_export_helpers.hpp"
+#include "catalog/glue_table.hpp"
 #include "core/glue_types.hpp"
 #include "functions/hive_reader_call.hpp"
 #include "duckdb/function/cast/cast_function_set.hpp"
@@ -140,17 +142,17 @@ static bool SameCSVDialect(const HiveCSVOptions &a, const HiveCSVOptions &b) {
 	       a.null_for_invalid_data == b.null_for_invalid_data && a.false_unless_true == b.false_unless_true;
 }
 
-string HiveScanInfo::PartitionStorageMismatch(const GluePartitionInfo &partition) const {
-	if (!table_definition) {
-		return string();
+ErrorData HiveScanInfo::PartitionStorageMismatch(const GluePartitionInfo &partition) const {
+	if (!this->table) {
+		return ErrorData();
 	}
-	auto &table = *table_definition;
+	auto &table = this->table->Cast<GlueTable>().table_info;
 	auto &input_format = partition.input_format.empty() ? table.input_format : partition.input_format;
 	auto &serde_library = partition.serde_library.empty() ? table.serde_library : partition.serde_library;
 	if (StringUtil::CIEquals(input_format, table.input_format) &&
 	    StringUtil::CIEquals(serde_library, table.serde_library) &&
 	    (partition.serde_library.empty() || partition.serde_parameters == table.serde_parameters)) {
-		return string();
+		return ErrorData();
 	}
 	auto partition_storage = table;
 	partition_storage.input_format = input_format;
@@ -181,24 +183,27 @@ string HiveScanInfo::PartitionStorageMismatch(const GluePartitionInfo &partition
 			stored_as = "an unsupported format";
 		}
 	}
+	// the names differ but read alike, e.g. the older parquet.hive.* classes of a Parquet table
 	if (stored_as.empty()) {
-		return string();
+		return ErrorData();
 	}
 	vector<string> spec;
 	for (idx_t i = 0; i < partition_keys.size() && i < partition.values.size(); i++) {
 		spec.push_back(partition_keys[i] + "=" + partition.values[i]);
 	}
-	return StringUtil::Format("Partition [%s] of Hive table '%s' is stored as %s (InputFormat '%s', SerDe '%s'), but "
-	                          "the table as %s (SerDe '%s'): partitions stored in a format other than the table's can "
-	                          "not be read yet",
-	                          StringUtil::Join(spec, ", "), Describe(), stored_as, input_format, serde_library,
-	                          HiveFileFormatToString(file_format), table.serde_library);
+	return ErrorData(
+	    ExceptionType::NOT_IMPLEMENTED,
+	    StringUtil::Format("Partition [%s] of Hive table '%s' is stored as %s (InputFormat '%s', SerDe '%s'), but "
+	                       "the table as %s (SerDe '%s'): partitions stored in a format other than the table's can "
+	                       "not be read yet",
+	                       StringUtil::Join(spec, ", "), Describe(), stored_as, input_format, serde_library,
+	                       HiveFileFormatToString(file_format), table.serde_library));
 }
 
-void HiveScanInfo::CheckPartitionStorage(const GluePartitionInfo &partition) const {
+void HiveScanInfo::VerifyConsistentPartitionSerDe(const GluePartitionInfo &partition) const {
 	auto mismatch = PartitionStorageMismatch(partition);
-	if (!mismatch.empty()) {
-		throw NotImplementedException(mismatch);
+	if (mismatch.HasError()) {
+		mismatch.Throw();
 	}
 }
 
@@ -216,10 +221,10 @@ static bool CanReadPartitionTypeAs(ClientContext &context, const LogicalType &fr
 
 void HiveScanInfo::CheckPartitionColumns(ClientContext &context, const GluePartitionInfo &partition,
                                          const vector<idx_t> &column_indexes) const {
-	if (partition.columns.empty() || !table_definition) {
+	if (partition.columns.empty() || !this->table) {
 		return;
 	}
-	auto &table_columns = table_definition->columns;
+	auto &table_columns = this->table->Cast<GlueTable>().table_info.columns;
 	for (auto column_index : column_indexes) {
 		auto &name = names[column_index].GetIdentifierName();
 		optional_ptr<const GlueColumn> partition_column;
@@ -511,7 +516,7 @@ bool HiveMultiFileList::ExpandNextPath() const {
 	}
 	auto partitions = scan_info->Partitions(client_context);
 	for (auto partition_index : job.partitions) {
-		scan_info->CheckPartitionStorage((*partitions)[partition_index]);
+		scan_info->VerifyConsistentPartitionSerDe((*partitions)[partition_index]);
 	}
 	if (job.root) {
 		ListRoot(job.partitions);
@@ -891,6 +896,20 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		param_map["nullstr"] = Value(scan_info->csv_options.null_string);
 		// a quoted empty field is an empty string, not NULL (Hive reads it that way, and DuckDB writes it for one)
 		param_map["allow_quoted_nulls"] = Value::BOOLEAN(false);
+		{
+			// Hive reads a line of any length, read_csv none longer than max_line_size (2 MB by default)
+			idx_t max_line_size = HIVE_CSV_DEFAULT_MAX_LINE_SIZE;
+			Value setting;
+			if (context.TryGetCurrentSetting("hive_csv_max_line_size", setting) && !setting.IsNull()) {
+				max_line_size = UBigIntValue::Get(setting);
+			}
+			param_map["max_line_size"] = Value::BIGINT(NumericCast<int64_t>(max_line_size));
+			// a line has to fit in one of the reader's buffers, which hold 32 MB by default
+			auto default_buffer_size = CSVReaderOptions().buffer_size_option.GetValue();
+			if (max_line_size > default_buffer_size) {
+				param_map["buffer_size"] = Value::BIGINT(NumericCast<int64_t>(max_line_size));
+			}
+		}
 		if (scan_info->csv_options.serde_fields) {
 			// as the SerDes do: missing trailing fields are NULL and the fields beyond the last column are ignored
 			param_map["null_padding"] = Value::BOOLEAN(true);
@@ -910,6 +929,7 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		ExtensionHelper::AutoLoadExtension(context, "json");
 		param_map["columns"] = Value::STRUCT(data_columns);
 		param_map["format"] = Value("newline_delimited");
+		param_map["case_insensitive_keys"] = Value::BOOLEAN(scan_info->json_options.case_insensitive_keys);
 		if (scan_info->json_options.ignore_errors) {
 			param_map["ignore_errors"] = Value::BOOLEAN(true);
 		}

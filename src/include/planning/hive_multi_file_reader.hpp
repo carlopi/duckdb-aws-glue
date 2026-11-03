@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "duckdb/common/mutex.hpp"
@@ -30,8 +31,6 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! The columns of the table: data columns first, partition keys last
 	vector<Identifier> names;
 	vector<LogicalType> types;
-	//! The Glue definition of the table, null for a hive_scan
-	shared_ptr<const GlueTableInfo> table_definition;
 	//! The file format of the data files
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
 	HiveCSVOptions csv_options;
@@ -64,9 +63,9 @@ struct HiveScanInfo : public TableFunctionInfo {
 	const GluePartitionInfo &GetPartitionOfFile(const string &path) const;
 	//! Throws unless the partition's own storage format reads its files as the scan's reader does: Hive reads every
 	//! partition with its own SerDe, and the scan binds one reader for the table
-	void CheckPartitionStorage(const GluePartitionInfo &partition) const;
-	//! The error CheckPartitionStorage throws for the partition, empty when it reads like the table
-	string PartitionStorageMismatch(const GluePartitionInfo &partition) const;
+	void VerifyConsistentPartitionSerDe(const GluePartitionInfo &partition) const;
+	//! The error VerifyConsistentPartitionSerDe throws for the partition, none when it reads like the table
+	ErrorData PartitionStorageMismatch(const GluePartitionInfo &partition) const;
 	//! Throws when a data column the scan reads ('column_indexes' into 'names') is declared by the partition with a
 	//! type its files can not be read as the table's type from: matched by position for csv, by name otherwise
 	void CheckPartitionColumns(ClientContext &context, const GluePartitionInfo &partition,
