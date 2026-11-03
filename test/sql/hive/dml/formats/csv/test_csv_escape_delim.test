@@ -1,7 +1,5 @@
 # name: test/sql/hive/dml/formats/csv/test_csv_escape_delim.test
-# description: LazySimpleSerDe tables with escape.delim ("ROW FORMAT DELIMITED ... ESCAPED BY"): the escape character
-#              makes the next character part of the field when reading, and INSERT escapes the escape character and
-#              the delimiter
+# description: LazySimpleSerDe tables with escape.delim (ESCAPED BY): reads unescape fields and INSERT escapes them
 # group: [csv]
 
 require httpfs
