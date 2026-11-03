@@ -17,20 +17,6 @@ namespace duckdb {
 //! A CREATE TABLE AS writes only to a location without data files: the files of a dropped table there would read as
 //! rows of the new one. Files a scan skips (_SUCCESS, directory markers, empty files) do not count; with 'overwrite'
 //! the data files are deleted instead.
-//! 'location' without a trailing slash, with s3a:// and s3n:// read as s3://, so that locations can be compared
-static string ComparableLocation(string location) {
-	StringUtil::RTrim(location, "/");
-	auto scheme_end = location.find("://");
-	if (scheme_end == string::npos) {
-		return location;
-	}
-	auto scheme = StringUtil::Lower(location.substr(0, scheme_end));
-	if (scheme == "s3a" || scheme == "s3n") {
-		scheme = "s3";
-	}
-	return scheme + location.substr(scheme_end);
-}
-
 //! Whether one location holds the other, so that files of one are files of the other
 static bool LocationsOverlap(const string &a, const string &b) {
 	return a == b || StringUtil::StartsWith(a, b + "/") || StringUtil::StartsWith(b, a + "/");
