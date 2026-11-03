@@ -62,6 +62,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "ENDPOINT. At most 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
+	config.AddExtensionOption("glue_max_retries",
+	                          "Set a custom retry limit for AWS SDK Glue API calls: the number of retries after the "
+	                          "first attempt fails, 0 meaning no retries (single attempt), at most 10. -1, the "
+	                          "default, leaves the SDK's own retry policy in place.",
+	                          LogicalType::BIGINT, Value::BIGINT(-1));
+
 	config.AddExtensionOption("glue_create_bucketed_tables",
 	                          "Allow CREATE TABLE ... WITH (BucketColumns = [...], NumberOfBuckets = n, SortColumns = "
 	                          "[...]) to create a bucketed (clustered) Hive table. DuckDB reads such a table but does "
