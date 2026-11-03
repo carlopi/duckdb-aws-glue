@@ -61,6 +61,9 @@ Text tables are read the way their SerDe reads them:
   details: surrounding spaces are ignored, `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped
   (Hive: a row of NULLs).
 - `skip.header.line.count` lines are skipped at the start of every file.
+- A line may be up to `hive_csv_max_line_size` bytes long (default 8000000; Hive has no limit); a longer line fails
+  the query. Up to the default the reader's buffers and how a file is split between threads are unchanged; a larger
+  limit makes each thread read at least that many bytes.
 - OpenX JsonSerDe: with `ignore.malformed.json` or `use.null.for.invalid.data` set to `true` the files are read with
   `read_json(ignore_errors := true)`: a line that is not valid JSON is a row of NULLs and a value that does not fit
   its column is NULL; either property enables both. Other JsonSerDe properties that change how the files are read
@@ -76,8 +79,10 @@ Text tables are read the way their SerDe reads them:
   `serialization.encoding`, `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the
   NULL string. Writes need a single-byte delimiter.
 - As in Hive, a table property overrides the SerDe property of the same name and keys are case-sensitive. Line counts
-  and byte codes are DuckDB integer casts (`'1.5'` is 2). Partitions are read with the table's SerDe properties, not
-  their own. `hive_scan()` uses plain `read_csv` rules.
+  and byte codes are DuckDB integer casts (`'1.5'` is 2). Partitions are read with the table's SerDe and SerDe
+  properties: a scan that reaches a partition whose own InputFormat, SerDe or SerDe properties read its files
+  differently (a csv partition of a parquet table, another delimiter) fails with an error naming the partition instead
+  of reading it as the table's format. `hive_scan()` uses plain `read_csv` rules.
 
 Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader`) with these read semantics:
 
@@ -171,7 +176,14 @@ their codec themselves.
   rows twice. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
   column list must list them last. `CREATE TABLE ... AS` creates the Glue table when the statement starts executing,
   before the query runs (planning it, e.g. with `EXPLAIN` or `PREPARE`, creates nothing); if the query fails the
-  (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
+  (empty) table stays. It is refused when the location already holds data files, such as those of a dropped table,
+  which would read as rows of the new table. `WITH (overwrite = true)` deletes those files instead, in one
+  `RemoveFiles` call when the statement starts executing and before the table is created: they stay deleted if the
+  statement then fails, and a failed delete may leave some of them (the table is then not created). It is refused
+  when the location is, holds or lies inside the location of another table in the same Glue database; tables in
+  other databases, catalogs or accounts are not checked. `CREATE OR REPLACE` refuses `overwrite`. Files a scan skips
+  (`_SUCCESS`, hidden files) are left. `overwrite` is not stored as a table parameter, and a `CREATE TABLE` without a
+  query refuses it. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
   they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created. Like
   Athena, JSON tables are written only with the Hive JsonSerDe (`org.apache.hive.hcatalog.data.JsonSerDe`, what
   `CREATE TABLE ... WITH (format = 'json')` creates): `INSERT` into a table with the OpenX JSON SerDe
@@ -218,7 +230,11 @@ Glue has no transactions: DDL takes effect immediately, files are visible as soo
 is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported. DDL (`CREATE`/`ALTER`/`DROP`
 of schemas, tables and views, `CREATE TABLE ... AS`, the partition SQL, or `glue_add_partition`, `glue_alter_table`,
 ...) and `INSERT` inside an explicit `BEGIN` transaction are an error that aborts the transaction; end it with
-`COMMIT`, `ABORT` or `ROLLBACK` and run the statement again.
+`COMMIT`, `ABORT` or `ROLLBACK` and run the statement again. The `glue_*` functions that change Glue
+(`glue_add_partition`, `glue_drop_partition`, `glue_rename_partition`, `glue_set_partition_location`,
+`glue_set_table_location`, `glue_replace_columns`) name themselves in that error and say to run them as a statement of
+their own, `CALL glue_replace_columns(...)`. This also applies to `SELECT * FROM glue_replace_columns(...)` from a
+client that runs each query inside a transaction of its own.
 
 Within a DuckDB transaction
 (`BEGIN` … `COMMIT`) a table's definition and its list of partitions are fetched from Glue once and reused; the files
@@ -284,12 +300,12 @@ of a Glue table or of a `hive_scan()` call, using only core DuckDB types:
 
 - `HiveScanGetReaderCall(get)`: the reader (`read_parquet`, `read_csv`, `read_json` or `read_avro`), its named
   parameters and the scan's data columns as expressions over the reader's columns. The parameters are those the scan
-  bound the reader with (a text table's dialect, header lines and NULL spelling, `hive_csv_parallel` as the planning
-  session had it), plus the data columns as `schema` for Parquet and Avro and `hive_partitioning := false`. A column
-  of a SerDe text table is the field read as text and converted with `TRY_CAST` (`CAST` without
-  `use.null.for.invalid.data` in an OpenCSVSerde table, `lower(field) = 'true'` for an OpenCSVSerde boolean), of the
-  field wrapped in `__internal_barrier`, so the caller's optimizer does not push the conversion into `read_csv`,
-  which would convert the text itself and strictly.
+  bound the reader with (a text table's dialect, header lines and NULL spelling, `hive_csv_parallel` and
+  `hive_csv_max_line_size` as the planning session had them), plus the data columns as `schema` for Parquet and Avro and
+  `hive_partitioning := false`. A column of a SerDe text table is the field read as text and converted with `TRY_CAST`
+  (`CAST` without `use.null.for.invalid.data` in an OpenCSVSerde table, `lower(field) = 'true'` for an OpenCSVSerde
+  boolean), of the field wrapped in `__internal_barrier`, so the caller's optimizer does not push the conversion into
+  `read_csv`, which would convert the text itself and strictly.
 - `HiveScanGetFilePartitionValues(get, path)`: the values of the partition a listed file belongs to, as constants of
   the partition columns' types. The path is the file's as the scan listed it, or another spelling of it that DuckDB's
   `Path` normalizes to it (`s3://b//x` or `s3://b/./x` for `s3://b/x`).
@@ -317,13 +333,16 @@ query.
 
 | function | Hive statement |
 |----------|------------------|
-| `glue_partitions('cat.db.t')` | `SHOW PARTITIONS`: one row per registered partition, a typed column per partition key plus `location` (numbered like a duplicate result column, `location_1`, when a partition key is called `location`) |
+| `glue_partitions('cat.db.t')` | `SHOW PARTITIONS`: one row per registered partition, a typed column per partition key plus `location` and `partition_values`, the strings Glue stores (`__HIVE_DEFAULT_PARTITION__` for NULL); a typed column is NULL both for the NULL partition and for a value the key's type cannot hold, `partition_values` tells them apart. Both are numbered like a duplicate result column (`location_1`) when a partition key has their name |
 | `glue_get_partition_response('cat.db.t', {dt: '2016-05-14', country: 'IN'})` | `DESCRIBE FORMATTED ... PARTITION (...)`: the partition's location, SerDe, columns and parameters, and its complete Glue definition in `response` |
 | `CALL glue_add_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, location := 's3://...', if_not_exists := false)` | `ALTER TABLE ADD [IF NOT EXISTS] PARTITION (...) [LOCATION ...]`; without `location` the partition lives at `<table location>/dt=2016-05-14/country=IN` |
 | `CALL glue_drop_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, if_exists := false)` | `ALTER TABLE DROP [IF EXISTS] PARTITION (...)`; the data files stay in S3 |
 | `CALL glue_rename_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, {dt: '2016-05-15', country: 'IN'})` | `ALTER TABLE PARTITION (...) RENAME TO PARTITION (...)`; changes the values, keeps the location |
 | `CALL glue_set_partition_location('cat.db.t', {dt: '2016-05-14', country: 'IN'}, 's3://...')` | `ALTER TABLE PARTITION (...) SET LOCATION '...'` |
 | `CALL glue_set_table_location('cat.db.t', 's3://...')` | `ALTER TABLE SET LOCATION '...'`; existing partitions keep their locations, new ones land under the new location |
+
+The functions that change Glue are called with `CALL`, outside a `BEGIN` transaction, since Glue has no transactions
+(see [Writing](#writing)).
 
 The Hive SQL forms are available as well, through the `glue_hive_ddl` grammar extension the extension registers.
 Grammar extensions are switched on per connection:
@@ -343,6 +362,19 @@ Actions can be chained in one statement (`ADD PARTITION (...) LOCATION '...' ADD
 becomes `CALL glue_alter_table(table, [actions])`: every action is checked against Glue before any is applied, so a
 statement that fails changes nothing, and consecutive adds go out as one `BatchCreatePartition` call. The table name
 may be partially qualified; it is resolved like in a query.
+
+`glue_partitions` lists every registered partition with a typed column per partition key, its `location` and
+`partition_values`, the strings Glue stores. A typed column is NULL for the NULL partition (Glue stores
+`__HIVE_DEFAULT_PARTITION__`) and for a value the key's type cannot hold, such as `abc` registered by another tool on
+an integer key; the latter fails every filtered read of the table, and `partition_values` is how to find it, one
+condition per partition key:
+
+```sql
+SELECT location, partition_values
+FROM glue_partitions('my_datalake.default.orders')
+WHERE (dt IS NULL) <> (partition_values[1] = '__HIVE_DEFAULT_PARTITION__')
+   OR (country IS NULL) <> (partition_values[2] = '__HIVE_DEFAULT_PARTITION__');
+```
 
 Listing the partitions of a table - `glue_partitions`, and planning a scan of a partitioned table - pages through
 Glue's `GetPartitions`. A scan fetches them when planning first needs them (pruning, cardinality), not at bind, so

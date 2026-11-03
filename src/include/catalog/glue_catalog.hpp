@@ -30,6 +30,8 @@ public:
 	static unique_ptr<SecretEntry> GetStorageSecret(ClientContext &context, const string &secret_name);
 	//! Glue has no transactions: throw on DDL or INSERT inside an explicit (BEGIN) transaction
 	static void ThrowIfInExplicitTransaction(ClientContext &context);
+	//! The same for a glue_* function that changes Glue, naming it in the error
+	static void ThrowIfInExplicitTransaction(ClientContext &context, const char *function);
 
 	void Initialize(bool load_builtin) override;
 	string GetCatalogType() override {
