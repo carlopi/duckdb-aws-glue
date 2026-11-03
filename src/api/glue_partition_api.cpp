@@ -56,8 +56,7 @@ bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const s
 	if (!GetPartition(context, catalog, database_name, table_name, values, details)) {
 		return false;
 	}
-	result.values = std::move(details.values);
-	result.location = std::move(details.location);
+	result = std::move(static_cast<GluePartitionInfo &>(details));
 	return true;
 }
 
@@ -86,6 +85,7 @@ bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const s
 	}
 	auto &storage_descriptor = partition.GetStorageDescriptor();
 	result.location = ToStdString(storage_descriptor.GetLocation());
+	result.input_format = ToStdString(storage_descriptor.GetInputFormat());
 	result.serde_library = ToStdString(storage_descriptor.GetSerdeInfo().GetSerializationLibrary());
 	result.serde_parameters = ToStdMap(storage_descriptor.GetSerdeInfo().GetParameters());
 	result.columns = ToColumns(storage_descriptor.GetColumns());
@@ -195,9 +195,13 @@ GluePartitionInfo GluePartitionInfo::FromPartition(const Aws::Glue::Model::Parti
 	for (auto &value : partition.GetValues()) {
 		result.values.push_back(ToStdString(value));
 	}
-	result.location = ToStdString(partition.GetStorageDescriptor().GetLocation());
+	auto &storage_descriptor = partition.GetStorageDescriptor();
+	result.location = ToStdString(storage_descriptor.GetLocation());
+	result.input_format = ToStdString(storage_descriptor.GetInputFormat());
+	result.serde_library = ToStdString(storage_descriptor.GetSerdeInfo().GetSerializationLibrary());
+	result.serde_parameters = ToStdMap(storage_descriptor.GetSerdeInfo().GetParameters());
 	if (include_columns) {
-		result.columns = ToColumns(partition.GetStorageDescriptor().GetColumns());
+		result.columns = ToColumns(storage_descriptor.GetColumns());
 	}
 	return result;
 }

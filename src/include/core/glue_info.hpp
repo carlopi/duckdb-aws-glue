@@ -199,10 +199,15 @@ struct GluePartitionInput {
 struct GluePartitionInfo {
 	vector<string> values;
 	string location;
+	//! The partition's own StorageDescriptor.InputFormat and SerdeInfo, which Hive reads its files with and which can
+	//! differ from the table's; empty when not known (a hive_scan, a deserialized plan)
+	string input_format;
+	string serde_library;
+	unordered_map<string, string> serde_parameters;
 	//! Empty unless the column schema was requested
 	vector<GlueColumn> columns;
 
-	//! The values and the location of a partition, and its columns when 'include_columns' is set
+	//! The values, the location and the storage format of a partition, and its columns when 'include_columns' is set
 	static GluePartitionInfo FromPartition(const Aws::Glue::Model::Partition &partition, bool include_columns);
 	//! The first data column this partition declares with another type than the table, matched by position as Hive
 	//! matches them. A partition that declares fewer columns (columns added to the table later) only has to agree on
@@ -210,10 +215,8 @@ struct GluePartitionInfo {
 	optional_idx FindColumnTypeMismatch(const vector<GlueColumn> &table_columns) const;
 };
 
-//! A partition as GetPartition returns it: also its storage descriptor and parameters
+//! A partition as GetPartition returns it: also its column schema and parameters
 struct GluePartitionDetails : public GluePartitionInfo {
-	string serde_library;
-	unordered_map<string, string> serde_parameters;
 	unordered_map<string, string> parameters;
 	//! The Partition object this projection was made from
 	shared_ptr<const GlueFetchedPartition> fetched;
