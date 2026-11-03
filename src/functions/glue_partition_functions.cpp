@@ -261,11 +261,16 @@ unique_ptr<FunctionData> GluePartitionsBind(ClientContext &context, TableFunctio
 		return_types.push_back(type);
 	}
 	names.emplace_back("location");
-	// location_1 (or the next free number) when a partition key is called location; the keys keep their names
+	// the strings as Glue stores them: 'abc' on an INT key is NULL above but 'abc' here
+	names.emplace_back("partition_values");
+	// numbered like duplicate result columns (location_1) when a partition key has the name; the keys keep their names
 	auto deduplicated = names;
 	QueryResult::DeduplicateColumns(deduplicated);
-	names.back() = deduplicated.back();
+	for (idx_t i = table.partition_keys.size(); i < names.size(); i++) {
+		names[i] = deduplicated[i];
+	}
 	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalType::LIST(LogicalType::VARCHAR));
 	auto load_partitions = [&]() {
 		return make_shared_ptr<const vector<GluePartitionInfo>>(
 		    GlueAPI::GetPartitions(context, *result->target.catalog, table.schema_name, table.name));
@@ -294,6 +299,13 @@ void GluePartitionsScan(ClientContext &context, TableFunctionInput &data, DataCh
 			output.data[k].Append(value);
 		}
 		output.data[keys.size()].Append(Value(partition.location));
+		auto &raw_column = output.data[keys.size() + 1];
+		vector<Value> raw_values;
+		raw_values.reserve(partition.values.size());
+		for (auto &str_value : partition.values) {
+			raw_values.emplace_back(str_value);
+		}
+		raw_column.Append(Value::LIST(ListType::GetChildType(raw_column.GetType()), std::move(raw_values)));
 		count++;
 	}
 }
@@ -305,7 +317,7 @@ unique_ptr<FunctionData> GlueAddPartitionBind(ClientContext &context, TableFunct
                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GluePartitionChangeBindData>();
 	result->target = ResolveGlueTable(context, "glue_add_partition", input.inputs[0]);
-	GlueCatalog::ThrowIfInExplicitTransaction(context);
+	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_add_partition");
 	result->values = ParsePartitionSpec("glue_add_partition", result->target, input.inputs[1]);
 	for (auto &option : input.named_parameters) {
 		auto name = StringUtil::Lower(option.first.GetIdentifierName());
@@ -350,7 +362,7 @@ unique_ptr<FunctionData> GlueDropPartitionBind(ClientContext &context, TableFunc
                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GluePartitionChangeBindData>();
 	result->target = ResolveGlueTable(context, "glue_drop_partition", input.inputs[0]);
-	GlueCatalog::ThrowIfInExplicitTransaction(context);
+	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_drop_partition");
 	result->values = ParsePartitionSpec("glue_drop_partition", result->target, input.inputs[1]);
 	for (auto &option : input.named_parameters) {
 		auto name = StringUtil::Lower(option.first.GetIdentifierName());
@@ -388,7 +400,7 @@ unique_ptr<FunctionData> GlueRenamePartitionBind(ClientContext &context, TableFu
                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GluePartitionChangeBindData>();
 	result->target = ResolveGlueTable(context, "glue_rename_partition", input.inputs[0]);
-	GlueCatalog::ThrowIfInExplicitTransaction(context);
+	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_rename_partition");
 	result->values = ParsePartitionSpec("glue_rename_partition", result->target, input.inputs[1]);
 	result->new_values = ParsePartitionSpec("glue_rename_partition", result->target, input.inputs[2]);
 	names = {"location"};
@@ -436,7 +448,7 @@ unique_ptr<FunctionData> GlueSetPartitionLocationBind(ClientContext &context, Ta
                                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GluePartitionChangeBindData>();
 	result->target = ResolveGlueTable(context, "glue_set_partition_location", input.inputs[0]);
-	GlueCatalog::ThrowIfInExplicitTransaction(context);
+	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_set_partition_location");
 	result->values = ParsePartitionSpec("glue_set_partition_location", result->target, input.inputs[1]);
 	result->location = ParseLocation("glue_set_partition_location", input.inputs[2]);
 	names = {"location"};
@@ -463,7 +475,7 @@ unique_ptr<FunctionData> GlueSetTableLocationBind(ClientContext &context, TableF
                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GluePartitionChangeBindData>();
 	result->target = ResolveGlueTable(context, "glue_set_table_location", input.inputs[0], false);
-	GlueCatalog::ThrowIfInExplicitTransaction(context);
+	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_set_table_location");
 	result->location = ParseLocation("glue_set_table_location", input.inputs[1]);
 	names = {"location"};
 	return_types = {LogicalType::VARCHAR};
@@ -513,7 +525,7 @@ unique_ptr<FunctionData> GlueReplaceColumnsBind(ClientContext &context, TableFun
                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GlueReplaceColumnsBindData>();
 	result->target = ResolveGlueTable(context, "glue_replace_columns", input.inputs[0], false);
-	GlueCatalog::ThrowIfInExplicitTransaction(context);
+	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_replace_columns");
 	auto &table = result->target.table;
 	auto &columns = input.inputs[1];
 	if (!IsStringStruct(columns) || StructType::GetChildCount(columns.type()) == 0) {

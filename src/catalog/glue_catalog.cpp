@@ -482,6 +482,15 @@ void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context) {
 	}
 }
 
+void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context, const char *function) {
+	if (!context.transaction.IsAutoCommit()) {
+		throw TransactionException(
+		    "%s changes Glue, which has no transactions, so it can not run inside a transaction: "
+		    "run it as a statement of its own, CALL %s(...), outside BEGIN ... COMMIT",
+		    function, function);
+	}
+}
+
 GlueTable &GlueCatalog::GetHiveTableForDML(ClientContext &context, TableCatalogEntry &table, const char *statement,
                                            GlueTableInfo &table_info) {
 	auto &glue_table = table.Cast<GlueTable>();

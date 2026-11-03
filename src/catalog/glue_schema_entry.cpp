@@ -287,6 +287,8 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 			} else {
 				result.csv_escape = string_value;
 			}
+		} else if (StringUtil::CIEquals(key, "overwrite")) {
+			result.overwrite = value.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>();
 		} else if (StringUtil::CIEquals(key, "header")) {
 			// csv files with a header line: Hive's "TBLPROPERTIES ('skip.header.line.count' = '1')"
 			if (value.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>()) {
@@ -512,6 +514,11 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransacti
 	CheckEntryType(existing, CatalogType::TABLE_ENTRY, table_name, "create");
 	if (existing) {
 		return OnExistingTable(base, database_info.name, table_name);
+	}
+	// CREATE TABLE AS creates its table through CreateTableFromInfo
+	if (!resolved_table_info && base.options.find("overwrite") != base.options.end()) {
+		throw BinderException("CREATE TABLE option 'overwrite' is only for CREATE TABLE ... AS: a table created "
+		                      "without a query writes no files");
 	}
 	auto table = resolved_table_info ? *resolved_table_info : BuildTableInfo(context, base);
 	D_ASSERT(table.name == table_name);
