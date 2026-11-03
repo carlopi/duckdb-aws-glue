@@ -20,8 +20,9 @@ public:
 	//! Look up a schema by name. Loads the schema from Glue if it is not cached yet, returns nullptr if it does not
 	//! exist
 	optional_ptr<CatalogEntry> GetEntry(ClientContext &context, const string &name);
-	//! The cached schema, nullptr if it is not loaded yet; never asks Glue
-	optional_ptr<CatalogEntry> GetLoadedEntry(const string &name);
+	//! The schema this set already holds, nullptr if it holds none of that name; never asks Glue. A schema found
+	//! through a table lookup is held before its definition is loaded (GlueSchemaEntry::GetSchemaInfo)
+	optional_ptr<CatalogEntry> GetCachedEntry(const string &name);
 	//! Insert 'entry' unless a schema of that name was loaded meanwhile; returns nullptr if one was
 	optional_ptr<CatalogEntry> AddEntryIfAbsent(unique_ptr<GlueSchemaEntry> entry);
 	void Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback);

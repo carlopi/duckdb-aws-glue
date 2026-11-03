@@ -20,6 +20,18 @@ class GlueClient;
 namespace duckdb {
 class GlueTable;
 
+//! The outcome of looking a table up before its schema (GlueCatalog::TryLookupTableBeforeSchema)
+enum class TableFirstLookup : uint8_t {
+	//! not a lookup it applies to, or the schema is already held: the regular lookup runs
+	SKIPPED,
+	//! the table exists, so its schema does too
+	TABLE_FOUND,
+	//! the schema exists, the table does not
+	TABLE_NOT_FOUND,
+	//! the schema does not exist
+	SCHEMA_NOT_FOUND
+};
+
 class GlueCatalog : public Catalog {
 public:
 	explicit GlueCatalog(AttachedDatabase &db_p, AccessMode access_mode, GlueAttachOptions options);
@@ -113,8 +125,8 @@ private:
 	//! Looks a table up before its database: finding the table proves the database exists, saving GetDatabase
 	CatalogEntryLookup TryLookupEntryInternal(CatalogTransaction transaction,
 	                                          const EntryLookupInfo &lookup_info) override;
-	//! Whether the table-first lookup settled the lookup into 'result'; false leaves it to the regular lookup
-	bool TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
+	//! Looks the table up before its schema; with SKIPPED the regular lookup runs instead
+	TableFirstLookup TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
 	                                CatalogEntryLookup &result);
 
 private:

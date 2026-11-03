@@ -30,7 +30,7 @@ void GlueSchemaSet::LoadEntries(ClientContext &context) {
 		auto entry = entries.find(database.name);
 		if (entry != entries.end()) {
 			// already loaded through a direct lookup, possibly from a table lookup that only knew the name
-			entry->second->SetDatabaseInfo(database);
+			entry->second->SetSchemaInfo(database);
 			continue;
 		}
 		entries.emplace(database.name, CreateSchemaEntry(database));
@@ -59,7 +59,7 @@ optional_ptr<CatalogEntry> GlueSchemaSet::GetEntry(ClientContext &context, const
 	return result.first->second.get();
 }
 
-optional_ptr<CatalogEntry> GlueSchemaSet::GetLoadedEntry(const string &name) {
+optional_ptr<CatalogEntry> GlueSchemaSet::GetCachedEntry(const string &name) {
 	lock_guard<mutex> guard(entry_lock);
 	auto entry = entries.find(name);
 	if (entry == entries.end()) {

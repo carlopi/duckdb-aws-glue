@@ -378,14 +378,19 @@ CatalogEntryLookup GlueCatalog::TryLookupEntryInternal(CatalogTransaction transa
 		return {nullptr, nullptr, ErrorData(BinderException("Catalog type does not support time travel"))};
 	}
 	CatalogEntryLookup result {nullptr, nullptr, ErrorData()};
-	if (lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY &&
-	    TryLookupTableBeforeSchema(transaction, lookup_info, result)) {
-		return result;
+	if (lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY) {
+		switch (TryLookupTableBeforeSchema(transaction, lookup_info, result)) {
+		case TableFirstLookup::TABLE_FOUND:
+		case TableFirstLookup::TABLE_NOT_FOUND:
+		case TableFirstLookup::SCHEMA_NOT_FOUND:
+			// 'result' holds the table and its schema, the schema alone, or neither
+			return result;
+		case TableFirstLookup::SKIPPED:
+			break;
+		}
 	}
 	// as Catalog::TryLookupEntryInternal, which is private
-	auto &full_path = lookup_info.GetQualifiedName().Path();
-	vector<Identifier> schema_path(full_path.begin(), full_path.end() - 1);
-	auto schema_lookup = EntryLookupInfo::SchemaLookup(lookup_info, std::move(schema_path));
+	auto schema_lookup = EntryLookupInfo::SchemaLookup(lookup_info, lookup_info.GetQualifiedName().Parent().Path());
 	result.schema = LookupSchema(transaction, schema_lookup, OnEntryNotFound::RETURN_NULL);
 	if (result.schema) {
 		result.entry = result.schema->LookupEntry(transaction, lookup_info);
@@ -393,37 +398,40 @@ CatalogEntryLookup GlueCatalog::TryLookupEntryInternal(CatalogTransaction transa
 	return result;
 }
 
-bool GlueCatalog::TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
-                                             CatalogEntryLookup &result) {
-	auto &full_path = lookup_info.GetQualifiedName().Path();
-	auto path = DatabasePath(vector<Identifier>(full_path.begin(), full_path.end() - 1), GetName().GetIdentifierName());
+TableFirstLookup GlueCatalog::TryLookupTableBeforeSchema(CatalogTransaction transaction,
+                                                         const EntryLookupInfo &lookup_info,
+                                                         CatalogEntryLookup &result) {
+	// the same database path LookupSchema resolves: a schema path naming more than one Glue database is left to it
+	auto path = DatabasePath(lookup_info.GetQualifiedName().Parent().Path(), GetName().GetIdentifierName());
 	if (path.size() != 1) {
-		return false;
+		return TableFirstLookup::SKIPPED;
 	}
 	// Glue keeps database names in lower case, as GetDatabase would name the schema
 	GlueDatabaseInfo database;
 	database.name = StringUtil::Lower(path[0]);
-	if (schemas.GetLoadedEntry(database.name)) {
-		return false;
+	if (schemas.GetCachedEntry(database.name)) {
+		return TableFirstLookup::SKIPPED;
 	}
 	auto schema = schemas.CreateSchemaEntry(database, false);
 	auto entry = schema->LookupEntry(transaction, lookup_info);
 	if (!entry) {
-		// the table or its database is missing: GetDatabase tells which, without asking for the table again
+		// the table or its schema is missing: GetDatabase tells which, without asking for the table again
 		auto loaded = schemas.GetEntry(transaction.GetContext(), database.name);
-		if (loaded) {
-			result.schema = &loaded->Cast<SchemaCatalogEntry>();
+		if (!loaded) {
+			return TableFirstLookup::SCHEMA_NOT_FOUND;
 		}
-		return true;
+		result.schema = &loaded->Cast<SchemaCatalogEntry>();
+		return TableFirstLookup::TABLE_NOT_FOUND;
 	}
+	// The set's lock is not held across the GetTable above, so another lookup can have added the schema since the
+	// GetCachedEntry check. Then that entry is kept and the regular lookup finds the table in it, from the cache.
 	auto added = schemas.AddEntryIfAbsent(std::move(schema));
 	if (!added) {
-		// loaded meanwhile: the regular lookup finds the table in that entry, from the cache
-		return false;
+		return TableFirstLookup::SKIPPED;
 	}
 	result.schema = &added->Cast<SchemaCatalogEntry>();
 	result.entry = entry;
-	return true;
+	return TableFirstLookup::TABLE_FOUND;
 }
 
 //! "<12-digit account>" or "<12-digit account>:..."
