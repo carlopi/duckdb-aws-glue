@@ -221,7 +221,11 @@ Glue has no transactions: DDL takes effect immediately, files are visible as soo
 is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported. DDL (`CREATE`/`ALTER`/`DROP`
 of schemas, tables and views, `CREATE TABLE ... AS`, the partition SQL, or `glue_add_partition`, `glue_alter_table`,
 ...) and `INSERT` inside an explicit `BEGIN` transaction are an error that aborts the transaction; end it with
-`COMMIT`, `ABORT` or `ROLLBACK` and run the statement again.
+`COMMIT`, `ABORT` or `ROLLBACK` and run the statement again. The `glue_*` functions that change Glue
+(`glue_add_partition`, `glue_drop_partition`, `glue_rename_partition`, `glue_set_partition_location`,
+`glue_set_table_location`, `glue_replace_columns`) name themselves in that error and say to run them as a statement of
+their own, `CALL glue_replace_columns(...)`. This also applies to `SELECT * FROM glue_replace_columns(...)` from a
+client that runs each query inside a transaction of its own.
 
 Within a DuckDB transaction
 (`BEGIN` … `COMMIT`) a table's definition and its list of partitions are fetched from Glue once and reused; the files
@@ -327,6 +331,9 @@ query.
 | `CALL glue_rename_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, {dt: '2016-05-15', country: 'IN'})` | `ALTER TABLE PARTITION (...) RENAME TO PARTITION (...)`; changes the values, keeps the location |
 | `CALL glue_set_partition_location('cat.db.t', {dt: '2016-05-14', country: 'IN'}, 's3://...')` | `ALTER TABLE PARTITION (...) SET LOCATION '...'` |
 | `CALL glue_set_table_location('cat.db.t', 's3://...')` | `ALTER TABLE SET LOCATION '...'`; existing partitions keep their locations, new ones land under the new location |
+
+The functions that change Glue are called with `CALL`, outside a `BEGIN` transaction, since Glue has no transactions
+(see [Writing](#writing)).
 
 The Hive SQL forms are available as well, through the `glue_hive_ddl` grammar extension the extension registers.
 Grammar extensions are switched on per connection:
