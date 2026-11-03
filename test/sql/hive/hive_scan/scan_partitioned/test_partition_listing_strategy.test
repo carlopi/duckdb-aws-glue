@@ -72,9 +72,9 @@ SELECT * FROM listings();
 ----
 0	2
 
-# 64 at a time on threads of their own: the 40 partitions are one round
+# 64 at a time on 64 threads: the 40 partitions are one round
 statement ok
-SET hive_partition_listing_concurrency = 64;
+SET threads = 64;
 
 statement ok
 CALL truncate_duckdb_logs();
@@ -104,7 +104,7 @@ SELECT * FROM listings();
 0	2
 
 statement ok
-RESET hive_partition_listing_concurrency;
+SET threads = 16;
 
 # hive_partition_listing_threshold fixes the choice instead: 12 partitions read are at least 10
 statement ok

@@ -102,8 +102,8 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   several at the same time. On a tie the location is listed when that makes a tenth of the requests, so a table
   of up to 1000 partitions lists its location from 10 partitions read (or fewer, when they take more than one round). The estimate assumes one file per partition;
   `SET hive_partition_listing_threshold = n` replaces it with a fixed rule (the location from n partitions read).
-  Partitions at custom locations are always listed on their own. `hive_partition_listing_concurrency` (default 0) sets how many: 0 lists them as tasks on DuckDB's threads, as
-  many at a time as `SET threads`, and a larger value lists that many at a time on threads of their own. A directory is listed once per
+  Partitions at custom locations are always listed on their own. They are listed as tasks on DuckDB's threads, as many at a time as
+  `SET threads`. A directory is listed once per
   query, shared by every scan of it and the cardinality sample. With `SET glue_cache_listings = true` (default
   false) the listing is kept for later statements of the connection as well, held and cleared like the metadata
   cache (`glue_metadata_cache_scope`, writes through the extension, rollback, DETACH) — so files added any other way

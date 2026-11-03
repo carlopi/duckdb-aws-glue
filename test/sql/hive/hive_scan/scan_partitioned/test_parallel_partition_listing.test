@@ -91,26 +91,6 @@ SELECT max(id) FROM my_datalake.default.pl_events WHERE dt LIKE 'c%' OR dt = 'sh
 ----
 10049
 
-# the same on threads of their own, 8 at a time
-statement ok
-SET hive_partition_listing_concurrency = 8;
-
-statement ok
-CALL truncate_duckdb_logs();
-
-query III
-SELECT count(*), sum(id), count(DISTINCT dt) FROM my_datalake.default.pl_events;
-----
-2050	2500225	25
-
-query I
-SELECT requests FROM listings();
-----
-25
-
-statement ok
-RESET hive_partition_listing_concurrency;
-
 # above the threshold the table location is listed once, recursively, and the 5 outside partitions in one batch
 statement ok
 RESET hive_partition_listing_threshold;
@@ -132,18 +112,6 @@ statement error
 SELECT count(*) FROM my_datalake.default.pl_events;
 ----
 <REGEX>:.*(pl-missing-bucket|NoSuchBucket|404).*
-
-# and if it fails on one of the listing threads
-statement ok
-SET hive_partition_listing_concurrency = 8;
-
-statement error
-SELECT count(*) FROM my_datalake.default.pl_events;
-----
-<REGEX>:.*(pl-missing-bucket|NoSuchBucket|404).*
-
-statement ok
-RESET hive_partition_listing_concurrency;
 
 statement ok
 RESET hive_partition_listing_threshold;

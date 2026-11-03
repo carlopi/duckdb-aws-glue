@@ -20,8 +20,6 @@
 #include "duckdb/common/type_visitor.hpp"
 #include "duckdb/parallel/task_executor.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
-#include "duckdb/common/atomic.hpp"
-#include "duckdb/common/thread.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/function_binder.hpp"
@@ -239,16 +237,6 @@ shared_ptr<const vector<idx_t>> HiveMultiFileList::PartitionIndexes() const {
 	return partition_indexes;
 }
 
-//! hive_partition_listing_concurrency: how many partition directories are listed at a time on threads of their own,
-//! or 0 to list them as tasks on DuckDB's threads
-static idx_t ListingConcurrency(ClientContext &context) {
-	Value setting;
-	if (context.TryGetCurrentSetting("hive_partition_listing_concurrency", setting) && !setting.IsNull()) {
-		return setting.GetValue<idx_t>();
-	}
-	return 0;
-}
-
 //! hive_partition_listing_threshold: the partitions read from which the table location is listed, when set
 static optional_idx ListingThreshold(ClientContext &context) {
 	Value setting;
@@ -260,10 +248,6 @@ static optional_idx ListingThreshold(ClientContext &context) {
 
 //! How many partition directories are listed at the same time when each partition gets its own listing
 static idx_t PartitionsListedTogether(ClientContext &context) {
-	auto concurrency = ListingConcurrency(context);
-	if (concurrency > 0) {
-		return concurrency;
-	}
 	return MaxValue<idx_t>(1, NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()));
 }
 
@@ -393,50 +377,14 @@ void HiveMultiFileList::ListPartitions(const vector<idx_t> &partition_indexes) c
 	// first error stops the listings not yet started and is thrown
 	vector<vector<OpenFileInfo>> listed(locations.size());
 	auto cached = CacheListings(client_context, *scan_info);
-	auto concurrency = ListingConcurrency(client_context);
-	if (concurrency == 0) {
-		// as tasks on DuckDB's threads
-		TaskExecutor executor(client_context);
-		vector<unique_ptr<BaseExecutorTask>> tasks;
-		for (idx_t i = 0; i < locations.size(); i++) {
-			tasks.push_back(make_uniq<ListPartitionTask>(executor, client_context, cached, locations[i], listed[i]));
-		}
-		executor.ScheduleTasks(std::move(tasks));
-		executor.WorkOnTasks();
-	} else {
-		// on threads of their own: a listing waits on S3 rather than working a CPU, so DuckDB's threads do not bound
-		// how many can be in flight
-		vector<ErrorData> errors(locations.size());
-		atomic<idx_t> next_location {0};
-		atomic<bool> failed {false};
-		auto list_locations = [&]() {
-			while (!failed) {
-				auto i = next_location++;
-				if (i >= locations.size()) {
-					return;
-				}
-				try {
-					ListDataFiles(client_context, cached, locations[i], listed[i]);
-				} catch (std::exception &ex) {
-					errors[i] = ErrorData(ex);
-					failed = true;
-				}
-			}
-		};
-		vector<thread> workers;
-		for (idx_t i = 1; i < MinValue<idx_t>(locations.size(), concurrency); i++) {
-			workers.emplace_back(list_locations);
-		}
-		list_locations();
-		for (auto &worker : workers) {
-			worker.join();
-		}
-		for (auto &error : errors) {
-			if (error.HasError()) {
-				error.Throw();
-			}
-		}
+	// as tasks on DuckDB's threads
+	TaskExecutor executor(client_context);
+	vector<unique_ptr<BaseExecutorTask>> tasks;
+	for (idx_t i = 0; i < locations.size(); i++) {
+		tasks.push_back(make_uniq<ListPartitionTask>(executor, client_context, cached, locations[i], listed[i]));
 	}
+	executor.ScheduleTasks(std::move(tasks));
+	executor.WorkOnTasks();
 	BuildPartitionLocations();
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (idx_t i = 0; i < locations.size(); i++) {
