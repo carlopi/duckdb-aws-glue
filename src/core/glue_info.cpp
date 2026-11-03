@@ -246,6 +246,9 @@ void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
 		return;
 	}
 	string value;
+	if (GetEscapeCharacter().size() > 1) {
+		refuse("has an 'escape.delim' of more than one byte");
+	}
 	if (GetEscapeCharacter() == GetFieldDelimiter()) {
 		refuse("has its field delimiter as 'escape.delim'");
 	}
@@ -328,10 +331,9 @@ string GlueTableInfo::GetEscapeCharacter() const {
 	if (GetSerDe() == HiveSerDe::OPEN_CSV) {
 		return GetOpenCSVCharacter("escapeChar", GetQuoteCharacter());
 	}
-	// LazySimpleSerDe escapes with the first character of escape.delim
 	string escape;
-	if (TryGetProperty("escape.delim", escape) && !escape.empty()) {
-		return escape.substr(0, 1);
+	if (TryGetProperty("escape.delim", escape)) {
+		return escape;
 	}
 	return string();
 }
