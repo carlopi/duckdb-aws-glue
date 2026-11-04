@@ -34,7 +34,7 @@ namespace duckdb {
 
 GlueSchemaEntry::GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, GlueDatabaseInfo database_info_p,
                                  bool schema_info_loaded)
-    : SchemaCatalogEntry(catalog, info), database_info(std::move(database_info_p)), tables(*this),
+    : SchemaCatalogEntry(catalog, info), tables(*this), database_info(std::move(database_info_p)),
       schema_info_loaded(schema_info_loaded) {
 }
 

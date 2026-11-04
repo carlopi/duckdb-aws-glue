@@ -22,7 +22,7 @@ class GlueTable;
 
 //! The outcome of looking a table up before its schema (GlueCatalog::TryLookupTableBeforeSchema)
 enum class TableLookup : uint8_t {
-	//! not a lookup it applies to, or the schema is already held: the regular lookup runs
+	//! the schema is already held, or was added meanwhile: the regular lookup runs
 	SKIPPED,
 	//! the table exists, so its schema does too
 	TABLE_FOUND,
@@ -129,7 +129,7 @@ private:
 	                                          const EntryLookupInfo &lookup_info) override;
 	//! Looks the table up before its schema; with SKIPPED the regular lookup runs instead
 	TableLookup TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
-	                                       CatalogEntryLookup &result);
+	                                       const string &database_name, CatalogEntryLookup &result);
 
 private:
 	//! for reading - the fetched catalog id or account id from ATTACH

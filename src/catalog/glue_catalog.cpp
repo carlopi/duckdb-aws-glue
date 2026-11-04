@@ -207,7 +207,7 @@ void GlueCatalog::SetDatabaseOption(GlueDatabaseInfo &database, const string &ke
 void GlueCatalog::AlterSchema(CatalogTransaction transaction, SchemaCatalogEntry &schema, AlterSchemaInfo &info) {
 	auto &context = transaction.GetContext();
 	ThrowIfInExplicitTransaction(context);
-	auto schema_name = schema.Cast<GlueSchemaEntry>().database_info.name;
+	auto schema_name = schema.Cast<GlueSchemaEntry>().GetDatabaseName();
 	// work on the current Glue definition, not the cached one
 	GlueDatabaseInfo database;
 	if (!GlueAPI::GetDatabase(context, *this, schema_name, database)) {
@@ -333,25 +333,20 @@ vector<reference<SchemaCatalogEntry>> GlueCatalog::GetSchemasForScan(ClientConte
 	return result;
 }
 
-//! Glue databases are not nested: "x".db.t with an unknown catalog x arrives as [x, db]
-static vector<string> DatabasePath(const vector<Identifier> &components, const string &catalog_name) {
-	vector<string> path;
-	for (auto &component : components) {
-		if (!component.empty()) {
-			path.push_back(component.GetIdentifierName());
-		}
-	}
-	if (path.size() > 1 && StringUtil::CIEquals(path[0], catalog_name)) {
-		path.erase(path.begin());
-	}
-	return path;
-}
-
 optional_ptr<SchemaCatalogEntry> GlueCatalog::LookupSchema(CatalogTransaction transaction,
                                                            const EntryLookupInfo &schema_lookup,
                                                            OnEntryNotFound if_not_found) {
 	auto &schema_name = schema_lookup.GetEntryName();
-	auto path = DatabasePath(schema_lookup.GetQualifiedName().Path(), GetName().GetIdentifierName());
+	// Glue databases are not nested: "x".db.t with an unknown catalog x arrives as [x, db]
+	vector<string> path;
+	for (auto &component : schema_lookup.GetQualifiedName().Path()) {
+		if (!component.empty()) {
+			path.push_back(component.GetIdentifierName());
+		}
+	}
+	if (path.size() > 1 && StringUtil::CIEquals(path[0], GetName().GetIdentifierName())) {
+		path.erase(path.begin());
+	}
 	if (path.size() > 1) {
 		if (if_not_found == OnEntryNotFound::RETURN_NULL) {
 			return nullptr;
@@ -378,8 +373,15 @@ CatalogEntryLookup GlueCatalog::TryLookupEntryInternal(CatalogTransaction transa
 		return {nullptr, nullptr, ErrorData(BinderException("Catalog type does not support time travel"))};
 	}
 	CatalogEntryLookup result {nullptr, nullptr, ErrorData()};
+	auto &catalog = lookup_info.GetCatalog();
+	auto &database_name = lookup_info.GetSchema().GetIdentifierName();
+	// Glue databases are not nested: "x".db.t with an unknown catalog x arrives as [x, db, t]
+	if (lookup_info.GetQualifiedName().Path().size() > 3 || database_name.empty() ||
+	    (!catalog.empty() && !StringUtil::CIEquals(catalog.GetIdentifierName(), GetName().GetIdentifierName()))) {
+		return result;
+	}
 	if (lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY) {
-		switch (TryLookupTableBeforeSchema(transaction, lookup_info, result)) {
+		switch (TryLookupTableBeforeSchema(transaction, lookup_info, database_name, result)) {
 		case TableLookup::TABLE_FOUND:
 		case TableLookup::TABLE_NOT_FOUND:
 		case TableLookup::SCHEMA_NOT_FOUND:
@@ -389,25 +391,19 @@ CatalogEntryLookup GlueCatalog::TryLookupEntryInternal(CatalogTransaction transa
 			break;
 		}
 	}
-	// as Catalog::TryLookupEntryInternal, which is private
-	auto schema_lookup = EntryLookupInfo::SchemaLookup(lookup_info, lookup_info.GetQualifiedName().Parent().Path());
-	result.schema = LookupSchema(transaction, schema_lookup, OnEntryNotFound::RETURN_NULL);
-	if (result.schema) {
+	auto schema = schemas.GetEntry(transaction.GetContext(), database_name);
+	if (schema) {
+		result.schema = &schema->Cast<SchemaCatalogEntry>();
 		result.entry = result.schema->LookupEntry(transaction, lookup_info);
 	}
 	return result;
 }
 
 TableLookup GlueCatalog::TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
-                                                    CatalogEntryLookup &result) {
-	// the same database path LookupSchema resolves: a schema path naming more than one Glue database is left to it
-	auto path = DatabasePath(lookup_info.GetQualifiedName().Parent().Path(), GetName().GetIdentifierName());
-	if (path.size() != 1) {
-		return TableLookup::SKIPPED;
-	}
+                                                    const string &database_name, CatalogEntryLookup &result) {
 	// Glue keeps database names in lower case, as GetDatabase would name the schema
 	GlueDatabaseInfo database;
-	database.name = StringUtil::Lower(path[0]);
+	database.name = StringUtil::Lower(database_name);
 	if (schemas.GetCachedEntry(database.name)) {
 		return TableLookup::SKIPPED;
 	}
