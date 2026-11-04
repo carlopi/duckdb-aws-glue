@@ -93,6 +93,40 @@ static unique_ptr<Expression> CheckedTextField(ClientContext &context, unique_pt
 	return make_uniq<BoundCaseExpression>(std::move(refused), std::move(raise), std::move(text));
 }
 
+//! A timestamp or a date as OpenCSVSerde reads it, the milliseconds or days since the epoch; an error when infinite
+static unique_ptr<Expression> EpochField(ClientContext &context, unique_ptr<Expression> value,
+                                         const string &error_message) {
+	FunctionBinder function_binder(context);
+	ErrorData error;
+	vector<unique_ptr<Expression>> infinite_children;
+	infinite_children.push_back(value->Copy());
+	auto infinite = function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("isinf"),
+	                                                   std::move(infinite_children), error);
+	if (!infinite) {
+		error.Throw();
+	}
+	auto is_date = value->GetReturnType() == LogicalType::DATE;
+	vector<unique_ptr<Expression>> number_children;
+	number_children.push_back(std::move(value));
+	if (is_date) {
+		number_children.push_back(make_uniq<BoundConstantExpression>(Value::DATE(date_t::epoch())));
+	}
+	auto number = function_binder.BindScalarFunction(
+	    Identifier::DefaultSchema(), Identifier(is_date ? "-" : "epoch_ms"), std::move(number_children), error);
+	if (!number) {
+		error.Throw();
+	}
+	vector<unique_ptr<Expression>> error_children;
+	error_children.push_back(make_uniq<BoundConstantExpression>(Value(error_message)));
+	auto raise = function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("error"),
+	                                                std::move(error_children), error);
+	if (!raise) {
+		error.Throw();
+	}
+	raise = BoundCastExpression::AddCastToType(context, std::move(raise), number->GetReturnType());
+	return make_uniq<BoundCaseExpression>(std::move(infinite), std::move(raise), std::move(number));
+}
+
 static optional_ptr<CopyFunctionCatalogEntry> TryGetCopyFunction(DatabaseInstance &db, const string &name) {
 	auto &system_catalog = Catalog::GetSystemCatalog(db);
 	auto data = CatalogTransaction::GetSystemTransaction(db);
@@ -360,6 +394,14 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 				                                  "which the table's %s files can not hold in a field",
 				                                  table_info.schema_name, table_info.name, names[i].GetIdentifierName(),
 				                                  reason, quoted ? "OpenCSVSerde" : "LazySimpleSerDe");
+				if (quoted && (types[i] == LogicalType::TIMESTAMP || types[i] == LogicalType::DATE)) {
+					column = EpochField(
+					    context, std::move(column),
+					    StringUtil::Format(
+					        "Writing to Hive table '%s.%s' failed: a value of column '%s' is infinite, which the "
+					        "table's OpenCSVSerde files can not hold in a field",
+					        table_info.schema_name, table_info.name, names[i].GetIdentifierName()));
+				}
 				// only unquoted fields can not tell the NULL string from NULL
 				column =
 				    CheckedTextField(context, std::move(column), forbidden, quoted ? nullptr : &null_string, message);
