@@ -822,23 +822,46 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 	auto table_name = bind_data.target.TableName();
 
 	// Glue has no transactions: check everything that can fail against the catalog first, so that a statement
-	// which fails half way registers or removes nothing. The partitions a rename or a new location rewrites are
-	// kept from this check.
+	// which fails half way registers or removes nothing. Which partitions exist is fetched together, each partition
+	// once; the partitions a rename or a new location rewrites are fetched whole and kept from this check.
+	set<vector<string>> lookups;
+	for (auto &step : bind_data.steps) {
+		switch (step.action) {
+		case GlueAlterAction::ADD:
+			if (!step.if_not_exists) {
+				lookups.insert(step.values);
+			}
+			break;
+		case GlueAlterAction::DROP:
+			if (!step.if_exists) {
+				lookups.insert(step.values);
+			}
+			break;
+		case GlueAlterAction::RENAME:
+			lookups.insert(step.new_values);
+			break;
+		case GlueAlterAction::SET_PARTITION_LOCATION:
+		case GlueAlterAction::SET_TABLE_LOCATION:
+			break;
+		}
+	}
+	auto existing = GlueAPI::ExistingPartitions(context, catalog, table.schema_name, table.name,
+	                                            vector<vector<string>>(lookups.begin(), lookups.end()));
+	auto exists = [&](const vector<string> &values) {
+		return existing.find(values) != existing.end();
+	};
 	vector<unique_ptr<GluePartitionDetails>> checked(bind_data.steps.size());
 	for (idx_t i = 0; i < bind_data.steps.size(); i++) {
 		auto &step = bind_data.steps[i];
-		GluePartitionInfo existing;
 		switch (step.action) {
 		case GlueAlterAction::ADD:
-			if (!step.if_not_exists &&
-			    GlueAPI::GetPartition(context, catalog, table.schema_name, table.name, step.values, existing)) {
+			if (!step.if_not_exists && exists(step.values)) {
 				throw CatalogException("Partition [%s] already exists in Glue table '%s'",
 				                       StringUtil::Join(step.values, ", "), table_name);
 			}
 			break;
 		case GlueAlterAction::DROP:
-			if (!step.if_exists &&
-			    !GlueAPI::GetPartition(context, catalog, table.schema_name, table.name, step.values, existing)) {
+			if (!step.if_exists && !exists(step.values)) {
 				throw CatalogException("Partition [%s] does not exist in Glue table '%s'",
 				                       StringUtil::Join(step.values, ", "), table_name);
 			}
@@ -850,14 +873,17 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 			break;
 		case GlueAlterAction::RENAME:
 			checked[i] = make_uniq<GluePartitionDetails>(FetchPartition(context, bind_data.target, step.values));
-			ThrowIfPartitionExists(context, bind_data.target, step.new_values);
+			if (exists(step.new_values)) {
+				throw CatalogException("Partition [%s] already exists in Glue table '%s'",
+				                       StringUtil::Join(step.new_values, ", "), table_name);
+			}
 			break;
 		case GlueAlterAction::SET_TABLE_LOCATION:
 			break;
 		}
 	}
 
-	// consecutive adds go out as one BatchCreatePartition call
+	// consecutive adds go out as one BatchCreatePartition call, consecutive drops as one BatchDeletePartition call
 	auto emit = [&](const GlueAlterStep &step) {
 		GlueAlterTableState::EmittedRow row;
 		row.action = Value(DescribeAction(step.action));
@@ -873,10 +899,23 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 		GlueAPI::BatchCreatePartitions(context, catalog, table, pending_adds);
 		pending_adds.clear();
 	};
+	vector<vector<string>> pending_drops;
+	set<vector<string>> pending_drop_set;
+	auto flush_drops = [&]() {
+		if (pending_drops.empty()) {
+			return;
+		}
+		GlueAPI::BatchDeletePartitions(context, catalog, table.schema_name, table.name, pending_drops);
+		pending_drops.clear();
+		pending_drop_set.clear();
+	};
 	for (idx_t i = 0; i < bind_data.steps.size(); i++) {
 		auto &step = bind_data.steps[i];
 		if (step.action != GlueAlterAction::ADD) {
 			flush_adds();
+		}
+		if (step.action != GlueAlterAction::DROP) {
+			flush_drops();
 		}
 		switch (step.action) {
 		case GlueAlterAction::ADD: {
@@ -887,7 +926,10 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 			break;
 		}
 		case GlueAlterAction::DROP:
-			GlueAPI::DeletePartition(context, catalog, table.schema_name, table.name, step.values);
+			// a partition named twice is deleted once
+			if (pending_drop_set.insert(step.values).second) {
+				pending_drops.push_back(step.values);
+			}
 			break;
 		case GlueAlterAction::RENAME:
 			GlueAPI::RenamePartition(context, catalog, table.schema_name, table.name, *checked[i], step.new_values);
@@ -907,6 +949,7 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 		emit(step);
 	}
 	flush_adds();
+	flush_drops();
 }
 
 void GlueAlterTableScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
