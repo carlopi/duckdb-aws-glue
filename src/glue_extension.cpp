@@ -107,9 +107,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    LogicalType::BOOLEAN, Value::BOOLEAN(false));
 
 	config.AddExtensionOption("hive_partition_listing_threshold",
-	                          "When a scan reads at least this many partitions below the table location, the location "
-	                          "is listed once (recursively) instead of one listing per partition. Default 10.",
-	                          LogicalType::UBIGINT, Value::UBIGINT(10));
+	                          "When set, a scan reading at least this many partitions below the table location lists "
+	                          "the location once (recursively) instead of one listing per partition. Unset (default), "
+	                          "the location is listed when that takes fewer rounds of requests than listing the "
+	                          "partitions read, or as many rounds and a tenth of the requests.",
+	                          LogicalType::UBIGINT, Value(LogicalType::UBIGINT));
 
 	config.AddExtensionOption("hive_csv_parallel",
 	                          "Read each file of an OpenCSVSerde table with several threads when a scan has at most "
