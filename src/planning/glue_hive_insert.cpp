@@ -55,6 +55,26 @@ static string DelimiterToString(const string &delimiter) {
 	return result;
 }
 
+//! The scalar function 'name' bound to 'children'
+static unique_ptr<Expression> BindFunction(ClientContext &context, const string &name,
+                                           vector<unique_ptr<Expression>> children) {
+	FunctionBinder function_binder(context);
+	ErrorData error;
+	auto result =
+	    function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier(name), std::move(children), error);
+	if (!result) {
+		error.Throw();
+	}
+	return result;
+}
+
+//! error(message), as a value of 'type'
+static unique_ptr<Expression> RaiseError(ClientContext &context, const string &message, const LogicalType &type) {
+	vector<unique_ptr<Expression>> children;
+	children.push_back(make_uniq<BoundConstantExpression>(Value(message)));
+	return BoundCastExpression::AddCastToType(context, BindFunction(context, "error", std::move(children)), type);
+}
+
 //! The text of a value written to a Hive text file; an error when it holds a 'forbidden' character or is 'null_string'
 static unique_ptr<Expression> CheckedTextField(ClientContext &context, unique_ptr<Expression> value,
                                                const string &forbidden, optional_ptr<const string> null_string,
@@ -65,16 +85,10 @@ static unique_ptr<Expression> CheckedTextField(ClientContext &context, unique_pt
 		pattern += StringUtil::Format("\\x{%02X}", static_cast<uint8_t>(c));
 	}
 	pattern += "]";
-	FunctionBinder function_binder(context);
-	ErrorData error;
 	vector<unique_ptr<Expression>> match_children;
 	match_children.push_back(text->Copy());
 	match_children.push_back(make_uniq<BoundConstantExpression>(Value(pattern)));
-	unique_ptr<Expression> refused = function_binder.BindScalarFunction(
-	    Identifier::DefaultSchema(), Identifier("regexp_matches"), std::move(match_children), error);
-	if (!refused) {
-		error.Throw();
-	}
+	auto refused = BindFunction(context, "regexp_matches", std::move(match_children));
 	if (null_string) {
 		auto conjunction = make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_OR);
 		conjunction->GetChildrenMutable().push_back(std::move(refused));
@@ -82,48 +96,32 @@ static unique_ptr<Expression> CheckedTextField(ClientContext &context, unique_pt
 		    ExpressionType::COMPARE_EQUAL, text->Copy(), make_uniq<BoundConstantExpression>(Value(*null_string))));
 		refused = std::move(conjunction);
 	}
-	vector<unique_ptr<Expression>> error_children;
-	error_children.push_back(make_uniq<BoundConstantExpression>(Value(error_message)));
-	auto raise = function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("error"),
-	                                                std::move(error_children), error);
-	if (!raise) {
-		error.Throw();
-	}
-	raise = BoundCastExpression::AddCastToType(context, std::move(raise), LogicalType::VARCHAR);
+	auto raise = RaiseError(context, error_message, LogicalType::VARCHAR);
 	return make_uniq<BoundCaseExpression>(std::move(refused), std::move(raise), std::move(text));
 }
 
-//! A timestamp or a date as OpenCSVSerde reads it, the milliseconds or days since the epoch; an error when infinite
+//! A timestamp or a date as OpenCSVSerde reads it, the milliseconds (truncated) or days since the epoch; an error when
+//! infinite
 static unique_ptr<Expression> EpochField(ClientContext &context, unique_ptr<Expression> value,
                                          const string &error_message) {
-	FunctionBinder function_binder(context);
-	ErrorData error;
 	vector<unique_ptr<Expression>> infinite_children;
 	infinite_children.push_back(value->Copy());
-	auto infinite = function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("isinf"),
-	                                                   std::move(infinite_children), error);
-	if (!infinite) {
-		error.Throw();
-	}
-	auto is_date = value->GetReturnType() == LogicalType::DATE;
+	auto infinite = BindFunction(context, "isinf", std::move(infinite_children));
+	unique_ptr<Expression> number;
 	vector<unique_ptr<Expression>> number_children;
-	number_children.push_back(std::move(value));
-	if (is_date) {
+	if (value->GetReturnType() == LogicalType::DATE) {
+		number_children.push_back(std::move(value));
 		number_children.push_back(make_uniq<BoundConstantExpression>(Value::DATE(date_t::epoch())));
+		number = BindFunction(context, "-", std::move(number_children));
+	} else {
+		// epoch_ms rounds to the nearest millisecond, which can move a value into the next day
+		vector<unique_ptr<Expression>> trunc_children;
+		trunc_children.push_back(make_uniq<BoundConstantExpression>(Value("millisecond")));
+		trunc_children.push_back(std::move(value));
+		number_children.push_back(BindFunction(context, "date_trunc", std::move(trunc_children)));
+		number = BindFunction(context, "epoch_ms", std::move(number_children));
 	}
-	auto number = function_binder.BindScalarFunction(
-	    Identifier::DefaultSchema(), Identifier(is_date ? "-" : "epoch_ms"), std::move(number_children), error);
-	if (!number) {
-		error.Throw();
-	}
-	vector<unique_ptr<Expression>> error_children;
-	error_children.push_back(make_uniq<BoundConstantExpression>(Value(error_message)));
-	auto raise = function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("error"),
-	                                                std::move(error_children), error);
-	if (!raise) {
-		error.Throw();
-	}
-	raise = BoundCastExpression::AddCastToType(context, std::move(raise), number->GetReturnType());
+	auto raise = RaiseError(context, error_message, number->GetReturnType());
 	return make_uniq<BoundCaseExpression>(std::move(infinite), std::move(raise), std::move(number));
 }
 
@@ -387,6 +385,7 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		                                          DelimiterToString(delimiter), null_string);
 		vector<unique_ptr<Expression>> select_list;
 		vector<LogicalType> projected_types;
+		auto csv_options = table_info.GetCSVOptions();
 		for (idx_t i = 0; i < names.size(); i++) {
 			unique_ptr<Expression> column = make_uniq<BoundReferenceExpression>(types[i], i);
 			if (std::find(partition_columns.begin(), partition_columns.end(), i) == partition_columns.end()) {
@@ -394,7 +393,8 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 				                                  "which the table's %s files can not hold in a field",
 				                                  table_info.schema_name, table_info.name, names[i].GetIdentifierName(),
 				                                  reason, quoted ? "OpenCSVSerde" : "LazySimpleSerDe");
-				if (quoted && (types[i] == LogicalType::TIMESTAMP || types[i] == LogicalType::DATE)) {
+				auto conversion = csv_options.FieldConversion(types[i]);
+				if (conversion == HiveFieldConversion::EPOCH || conversion == HiveFieldConversion::TRY_EPOCH) {
 					column = EpochField(
 					    context, std::move(column),
 					    StringUtil::Format(

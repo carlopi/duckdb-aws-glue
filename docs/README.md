@@ -75,8 +75,9 @@ Text tables are read the way their SerDe reads them:
   with `case.insensitive=false` matches them exactly. Keys of one object that differ only in case are duplicate keys.
 - Writes produce files Hive reads back unchanged: LazySimpleSerDe values are unquoted and refused if they hold the
   delimiter or a line break, or equal the NULL string; OpenCSVSerde values are all quoted and refused if they hold a
-  line break, and timestamps and dates are written as milliseconds and days since the epoch (an infinite value is
-  refused).
+  line break, and timestamps and dates are written as milliseconds (truncated) and days since the epoch (an infinite
+  value is refused). NULL is written as an empty field, which reads back as an empty string in a string column,
+  false in a boolean column and NULL elsewhere only with `use.null.for.invalid.data`; otherwise reading it fails.
 - Not supported, for reads and writes: footer lines (`skip.footer.line.count`), header lines in JsonSerDe tables,
   nested columns, multi-byte quote or escape characters, and for LazySimpleSerDe `escape.delim`, a non-UTF-8
   `serialization.encoding`, `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the
