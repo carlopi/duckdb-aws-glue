@@ -144,12 +144,6 @@ const GluePartitionInfo &HiveScanInfo::GetPartitionOfFile(const string &path) co
 	return (*partitions)[partition_index];
 }
 
-static bool SameCSVDialect(const HiveCSVOptions &a, const HiveCSVOptions &b) {
-	return a.delimiter == b.delimiter && a.quote == b.quote && a.escape == b.escape && a.skip_lines == b.skip_lines &&
-	       a.null_string == b.null_string && a.serde_fields == b.serde_fields &&
-	       a.null_for_invalid_data == b.null_for_invalid_data && a.false_unless_true == b.false_unless_true;
-}
-
 ErrorData HiveScanInfo::PartitionStorageMismatch(const GluePartitionInfo &partition) const {
 	if (!this->table) {
 		return ErrorData();
@@ -180,8 +174,7 @@ ErrorData HiveScanInfo::PartitionStorageMismatch(const GluePartitionInfo &partit
 			}
 			if (partition_format != file_format) {
 				stored_as = HiveFileFormatToString(partition_format);
-			} else if (partition_format == HiveFileFormat::CSV &&
-			           !SameCSVDialect(partition_storage.GetCSVOptions(), csv_options)) {
+			} else if (partition_format == HiveFileFormat::CSV && partition_storage.GetCSVOptions() != csv_options) {
 				stored_as = "csv with another dialect";
 			} else if (partition_format == HiveFileFormat::JSON &&
 			           partition_storage.GetJSONOptions().ignore_errors != json_options.ignore_errors) {
@@ -212,6 +205,54 @@ void HiveScanInfo::VerifyConsistentPartitionSerDe(const GluePartitionInfo &parti
 	auto mismatch = PartitionStorageMismatch(partition);
 	if (mismatch.HasError()) {
 		mismatch.Throw();
+	}
+}
+
+void HiveScanInfo::CheckPartitionColumns(ClientContext &context, const GluePartitionInfo &partition,
+                                         const vector<idx_t> &column_indexes) const {
+	if (partition.partition_columns.empty() || !this->table) {
+		return;
+	}
+	auto &table_columns = this->table->Cast<GlueTable>().table_info.columns;
+	for (auto column_index : column_indexes) {
+		auto &name = names[column_index].GetIdentifierName();
+		optional_ptr<const GlueColumn> partition_column;
+		if (file_format == HiveFileFormat::CSV) {
+			if (column_index < partition.partition_columns.size()) {
+				partition_column = &partition.partition_columns[column_index];
+			}
+		} else {
+			for (auto &column : partition.partition_columns) {
+				if (StringUtil::CIEquals(column.name, name)) {
+					partition_column = &column;
+					break;
+				}
+			}
+		}
+		if (!partition_column) {
+			continue;
+		}
+		LogicalType partition_type;
+		try {
+			partition_type = GlueTypes::ToLogicalType(StringUtil::Lower(partition_column->type));
+		} catch (std::exception &) {
+			// a type the extension can not map is left to the reader
+			continue;
+		}
+		if (GlueTypes::CanReadPartitionTypeAs(context, partition_type, types[column_index])) {
+			continue;
+		}
+		auto table_type =
+		    column_index < table_columns.size() ? table_columns[column_index].type : types[column_index].ToString();
+		vector<string> spec;
+		for (idx_t i = 0; i < partition_keys.size() && i < partition.values.size(); i++) {
+			spec.push_back(partition_keys[i] + "=" + partition.values[i]);
+		}
+		throw InvalidInputException("Partition [%s] of Hive table '%s' declares column '%s' as '%s', which can not be "
+		                            "read as the table's column '%s' of type '%s': the table's columns changed after "
+		                            "the partition was created",
+		                            StringUtil::Join(spec, ", "), Describe(), partition_column->name,
+		                            partition_column->type, name, table_type);
 	}
 }
 
@@ -1438,6 +1479,18 @@ void HiveMultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const M
 	optional_ptr<const GluePartitionInfo> partition;
 	if (!info.partition_keys.empty()) {
 		partition = &info.GetPartitionOfFile(reader_data.reader->GetFileName());
+		vector<idx_t> data_columns;
+		for (auto &column_id : global_column_ids) {
+			if (column_id.IsVirtualColumn()) {
+				continue;
+			}
+			auto column_index = column_id.GetPrimaryIndex();
+			if (info.GetPartitionKeyIndex(global_columns[column_index].name.GetIdentifierName()) ==
+			    DConstants::INVALID_INDEX) {
+				data_columns.push_back(column_index);
+			}
+		}
+		info.CheckPartitionColumns(context, *partition, data_columns);
 	}
 	auto &reader = *reader_data.reader;
 	bool file_metadata_read = false;
