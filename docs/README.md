@@ -360,8 +360,10 @@ ALTER TABLE my_datalake.default.orders SET LOCATION 's3://bucket/orders_v2/';
 
 Actions can be chained in one statement (`ADD PARTITION (...) LOCATION '...' ADD PARTITION (...) ...`). The statement
 becomes `CALL glue_alter_table(table, [actions])`: every action is checked against Glue before any is applied, so a
-statement that fails changes nothing, and consecutive adds go out as one `BatchCreatePartition` call. The table name
-may be partially qualified; it is resolved like in a query.
+statement that fails changes nothing, and consecutive adds go out as one `BatchCreatePartition` call. The checks fetch
+the partitions they look at with `BatchGetPartition`, and consecutive drops go out as `BatchDeletePartition` calls of
+up to 25 partitions, so dropping partitions needs `glue:BatchGetPartition` and `glue:BatchDeletePartition`. The table
+name may be partially qualified; it is resolved like in a query.
 
 `glue_partitions` lists every registered partition with a typed column per partition key, its `location` and
 `partition_values`, the strings Glue stores. A typed column is NULL for the NULL partition (Glue stores
