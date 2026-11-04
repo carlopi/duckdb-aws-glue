@@ -39,7 +39,8 @@ CREATE TABLE my_datalake.default.glog_avro WITH (format = 'avro') AS SELECT rang
 statement ok
 CALL enable_logging(['HTTP', 'GlueScan'], storage := 'memory');
 
-# a cold catalog: every request of the lookup and the partition load is logged
+# a cold catalog: every request of the lookup and the partition load is logged; finding the table first needs no
+# GetDatabase
 statement ok
 attach '{GLUE_CATALOG_ID}' as glog_cold (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
 
@@ -74,7 +75,6 @@ query III
 SELECT operation, status, bool_and(duration_ms >= 0 AND query_id IS NOT NULL) FROM glue_requests()
 GROUP BY ALL ORDER BY operation;
 ----
-AWSGlue.GetDatabase	OK_200	true
 AWSGlue.GetPartitions	OK_200	true
 AWSGlue.GetTable	OK_200	true
 

@@ -38,15 +38,10 @@ TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pl_elsewhere/c{i}/f.parquet';
 
 endloop
 
-# a partition that shares another one's location: its files should only be read once
-statement ok
-CALL glue_add_partition('my_datalake.default.pl_events', {dt: 'shared'},
-    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pl_elsewhere/c0');
-
 query I
 SELECT count(*) FROM glue_partitions('my_datalake.default.pl_events');
 ----
-26
+25
 
 # the listed prefix is in the URL's query string, and HTTP logs redact that by default
 statement ok
@@ -73,7 +68,7 @@ SELECT count(*), sum(id), count(DISTINCT dt) FROM my_datalake.default.pl_events;
 ----
 2050	2500225	25
 
-# one listing per directory: 20 under the table location, 5 outside it, and the shared one only once
+# one listing per directory: 20 under the table location, 5 outside it
 query I
 SELECT requests FROM listings();
 ----
@@ -87,7 +82,7 @@ c4	10
 d3	100
 
 query I
-SELECT max(id) FROM my_datalake.default.pl_events WHERE dt LIKE 'c%' OR dt = 'shared';
+SELECT max(id) FROM my_datalake.default.pl_events WHERE dt LIKE 'c%';
 ----
 10049
 
@@ -99,6 +94,30 @@ query III
 SELECT count(*), sum(id), count(DISTINCT dt) FROM my_datalake.default.pl_events;
 ----
 2050	2500225	25
+
+# a partition registered at another one's location, which holds files, is refused whichever way it is listed
+statement ok
+CALL glue_add_partition('my_datalake.default.pl_events', {dt: 'shared'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pl_elsewhere/c0');
+
+statement error
+SELECT count(*) FROM my_datalake.default.pl_events;
+----
+<REGEX>:.*Partitions \[c0\] and \[shared\] of Hive table .* are registered at the same location.*
+
+statement ok
+SET hive_partition_listing_threshold = 1000;
+
+statement error
+SELECT count(*) FROM my_datalake.default.pl_events WHERE dt = 'shared';
+----
+<REGEX>:.*Partitions \[c0\] and \[shared\] of Hive table .* are registered at the same location.*
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+statement ok
+CALL glue_drop_partition('my_datalake.default.pl_events', {dt: 'shared'});
 
 # if a listing fails in one of the tasks, the query fails too
 statement ok
