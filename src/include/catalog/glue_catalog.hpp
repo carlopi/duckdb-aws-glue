@@ -129,7 +129,7 @@ private:
 	                                          const EntryLookupInfo &lookup_info) override;
 	//! Looks the table up before its schema; with SKIPPED the regular lookup runs instead
 	TableFirstLookup TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
-	                                CatalogEntryLookup &result);
+	                                            CatalogEntryLookup &result);
 
 private:
 	//! for reading - the fetched catalog id or account id from ATTACH
