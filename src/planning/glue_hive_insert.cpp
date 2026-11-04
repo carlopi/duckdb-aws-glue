@@ -31,7 +31,7 @@
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "core/glue_types.hpp"
-#include "planning/hive_multi_file_reader.hpp"
+#include "core/hive_location.hpp"
 #include "execution/hive_copy.hpp"
 
 namespace duckdb {
@@ -125,6 +125,16 @@ static string RelativePartitionPath(const string &table_location, const string &
 	return StringUtil::Join(components, "/");
 }
 
+//! A VARCHAR expression that fails the query with 'message' when it is evaluated
+static unique_ptr<Expression> ErrorExpression(ClientContext &context, FunctionBinder &function_binder,
+                                              const string &message) {
+	vector<unique_ptr<Expression>> children;
+	children.push_back(make_uniq<BoundConstantExpression>(Value(message)));
+	return BoundCastExpression::AddCastToType(
+	    context, function_binder.BindScalarFunction(ErrorFun::GetFunction(), std::move(children)),
+	    LogicalType::VARCHAR);
+}
+
 //! The PARTITION_PATH of the copy: the hive layout (<key>=<value>/...), except for the existing partitions registered
 //! at other locations, which are written to their own location. 'partition_directories' receives the directories of
 //! those partitions with their Glue values.
@@ -191,15 +201,12 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 			check.when_expr = std::move(conjunction);
 		}
 		if (!writable) {
-			vector<unique_ptr<Expression>> message;
-			message.push_back(make_uniq<BoundConstantExpression>(Value(StringUtil::Format(
-			    "INSERT into Hive table '%s.%s' is not supported: partition [%s] is registered at '%s', whose path "
-			    "has an empty segment, and DuckDB can not write to it",
-			    table_info.schema_name, table_info.name, StringUtil::Join(partition.values, ", "),
-			    partition.location))));
-			check.then_expr = BoundCastExpression::AddCastToType(
-			    context, function_binder.BindScalarFunction(ErrorFun::GetFunction(), std::move(message)),
-			    LogicalType::VARCHAR);
+			check.then_expr = ErrorExpression(
+			    context, function_binder,
+			    StringUtil::Format("INSERT into Hive table '%s.%s' is not supported: partition [%s] is registered at "
+			                       "'%s', whose path has an empty or '.' segment, and DuckDB can not write to it",
+			                       table_info.schema_name, table_info.name, StringUtil::Join(partition.values, ", "),
+			                       partition.location));
 		} else if (relative_path.empty()) {
 			// the copy rejects a partition path that is not below its target
 			check.then_expr = make_uniq<BoundConstantExpression>(Value(partition.location));
@@ -213,17 +220,15 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 	// after the checks of the existing partitions: rows whose own directory is the location of another partition
 	// would be written there and read back as that partition
 	for (auto &custom : custom_directories) {
-		vector<unique_ptr<Expression>> message;
-		message.push_back(make_uniq<BoundConstantExpression>(Value(StringUtil::Format(
-		    "INSERT into Hive table '%s.%s' is not supported: rows would be written to '%s', the location of "
-		    "partition [%s], and read back as that partition",
-		    table_info.schema_name, table_info.name, custom.first, StringUtil::Join(custom.second, ", ")))));
 		BoundCaseCheck check;
 		check.when_expr = BoundComparisonExpression::Create(ExpressionType::COMPARE_EQUAL, hive_path->Copy(),
 		                                                    make_uniq<BoundConstantExpression>(Value(custom.first)));
-		check.then_expr = BoundCastExpression::AddCastToType(
-		    context, function_binder.BindScalarFunction(ErrorFun::GetFunction(), std::move(message)),
-		    LogicalType::VARCHAR);
+		check.then_expr = ErrorExpression(
+		    context, function_binder,
+		    StringUtil::Format("INSERT into Hive table '%s.%s' is not supported: rows would be written to '%s', the "
+		                       "location of partition [%s], and read back as that partition",
+		                       table_info.schema_name, table_info.name, custom.first,
+		                       StringUtil::Join(custom.second, ", ")));
 		result->CaseChecksMutable().push_back(std::move(check));
 	}
 	if (result->CaseChecks().empty()) {

@@ -157,7 +157,7 @@ CALL glue_add_partition('my_datalake.default.ploc_spelled', {p: 's3a'},
 statement error
 INSERT INTO my_datalake.default.ploc_spelled VALUES ('d1', 'dbl');
 ----
-<REGEX>:.*partition \[dbl\] is registered at '.*ploc_spelled//p=dbl', whose path has an empty segment, and DuckDB can not write to it.*
+<REGEX>:.*partition \[dbl\] is registered at '.*ploc_spelled//p=dbl', whose path has an empty or '.' segment, and DuckDB can not write to it.*
 
 statement ok
 INSERT INTO my_datalake.default.ploc_spelled VALUES ('a1', 's3a'), ('z2', 'z');

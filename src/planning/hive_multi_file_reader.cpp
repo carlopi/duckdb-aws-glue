@@ -1,4 +1,5 @@
 #include "planning/hive_multi_file_reader.hpp"
+#include "core/hive_location.hpp"
 #include "planning/hive_query_cache.hpp"
 #include "planning/stats/hive_stats.hpp"
 
@@ -210,18 +211,6 @@ string HiveScanInfo::Describe() const {
 		return table_name;
 	}
 	return database_name + "." + table_name;
-}
-
-string ComparableLocation(const string &location) {
-	auto result = location;
-	StringUtil::RTrim(result, "/");
-	auto scheme = StringUtil::Lower(result.substr(0, 6));
-	if (scheme == "s3a://" || scheme == "s3n://") {
-		result = "s3://" + result.substr(6);
-	} else if (StringUtil::Lower(result.substr(0, 5)) == "s3://") {
-		result = "s3://" + result.substr(5);
-	}
-	return result;
 }
 
 //! Whether a listed object below 'prefix' (the location, with its trailing slash) is a data file. Hive skips _* and .*

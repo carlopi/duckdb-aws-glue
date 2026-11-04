@@ -82,9 +82,6 @@ private:
 //! Whether a listed file below 'prefix' is a data file of a Hive table: not hidden (a path component starting with
 //! '_' or '.', as Spark's _SUCCESS), not a directory marker (_$folder$) and not empty
 bool IsDataFile(const OpenFileInfo &file, const string &prefix);
-//! A location to compare with other locations: s3a://, s3n:// and S3:// name the same bucket and key as s3://, and a
-//! trailing slash is dropped. Only for comparing; files are listed and read at the location as registered.
-string ComparableLocation(const string &location);
 
 //! The data files of a Hive table, listed lazily: nothing is listed until the scan asks for files, and the filters on
 //! the partition columns are applied to the partition values first (HiveMultiFileReader::ComplexFilterPushdown), so

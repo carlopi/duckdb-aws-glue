@@ -172,7 +172,7 @@ their codec themselves.
   string, `\N` for LazySimpleSerDe unless `serialization.null.format` says otherwise, and at most one header line) and register new partition directories in Glue with
   BatchCreatePartition. New partitions get `<key>=<value>` directories; rows of an existing partition are written to
   its registered location, which may be any directory below the table location (e.g. `<table>/2024/01`). Inserting
-  into a partition whose location is not below the table location, or whose location has an empty segment (`//`) DuckDB
+  into a partition whose location is not below the table location, or whose location has an empty or `.` segment (`//`, `/./`) DuckDB
   can not write, fails, and so does inserting rows whose directory is the location of another partition; the rows of
   other partitions can still be inserted. Glue errors on single partitions that may pass (throttling, internal errors) are retried; when Glue
   still refuses a partition, the write is rolled back by deleting the files it wrote (the partitions it registered
