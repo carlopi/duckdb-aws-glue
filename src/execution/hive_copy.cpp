@@ -21,7 +21,7 @@ static void ThrowIfLocationInUse(ClientContext &context, GlueSchemaEntry &schema
                                  const string &location) {
 	auto &catalog = schema.catalog.Cast<GlueCatalog>();
 	auto target = ComparableLocation(location);
-	auto tables = GlueAPI::GetTables(context, catalog, schema.database_info.name, false, nullptr, true);
+	auto tables = GlueAPI::GetTables(context, catalog, schema.GetDatabaseName(), false, nullptr, true);
 	for (auto &table : tables) {
 		if (table.location.empty() || !LocationsOverlap(target, ComparableLocation(table.location))) {
 			continue;

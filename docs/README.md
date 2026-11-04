@@ -364,8 +364,10 @@ ALTER TABLE my_datalake.default.orders SET LOCATION 's3://bucket/orders_v2/';
 
 Actions can be chained in one statement (`ADD PARTITION (...) LOCATION '...' ADD PARTITION (...) ...`). The statement
 becomes `CALL glue_alter_table(table, [actions])`: every action is checked against Glue before any is applied, so a
-statement that fails changes nothing, and consecutive adds go out as one `BatchCreatePartition` call. The table name
-may be partially qualified; it is resolved like in a query.
+statement that fails changes nothing, and consecutive adds go out as one `BatchCreatePartition` call. The checks fetch
+the partitions they look at with `BatchGetPartition`, and consecutive drops go out as `BatchDeletePartition` calls of
+up to 25 partitions, so dropping partitions needs `glue:BatchGetPartition` and `glue:BatchDeletePartition`. The table
+name may be partially qualified; it is resolved like in a query.
 
 `glue_partitions` lists every registered partition with a typed column per partition key, its `location` and
 `partition_values`, the strings Glue stores. A typed column is NULL for the NULL partition (Glue stores
@@ -435,6 +437,31 @@ SELECT request.type, request.url, request.headers['x-amz-target'], response.stat
 ```
 
 `SET glue_network_calls_via_duckdb = false` switches back to the SDK's own HTTP client.
+
+`glue_requests()` lists the Glue requests in the `HTTP` log, retries and pages included: `operation` (the
+`X-Amz-Target`, e.g. `AWSGlue.GetPartitions`), `status`, `reason`, `start_time`, `duration_ms` and the
+`connection_id`, `transaction_id` and `query_id` that made them. Only requests sent through DuckDB's HTTP layer are
+logged.
+
+The `GlueScan` log type (`INFO`) records what each scan of a Hive table does, one entry per `event`, with the
+`scan_id` that numbers the scans of a query from 1:
+
+- `partitions`: the table's `partitions` were loaded, taking `duration_ms`;
+- `plan`: of `partitions`, `partitions_read` are read, with `listings` S3 listings; `detail` is `root` when they are
+  listed in one listing of the table location, else `partitions`;
+- `listing`: one listing (`detail`: `table`, `root` or `partition`) of `partitions_read` partitions found `files`
+  data files in `duration_ms`;
+- `sample`: the cardinality sample listed `files` files and measured one in `duration_ms` (`files` is NULL when
+  nothing was listed: avro tables are not sampled). The scan reuses that listing, so a `listing` of the same
+  directory then takes next to no time. Every scan of the table in the query shares the one sample.
+
+```sql
+CALL enable_logging(['HTTP', 'GlueScan'], storage = 'memory');
+-- ... run queries ...
+SELECT operation, count(*), sum(duration_ms) FROM glue_requests() GROUP BY operation;
+SELECT "table", scan_id, event, partitions, partitions_read, listings, files, duration_ms, detail
+FROM duckdb_logs_parsed('GlueScan');
+```
 
 ## Testing
 
