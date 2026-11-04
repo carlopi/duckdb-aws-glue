@@ -443,7 +443,7 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	copy_info->options = std::move(copy_options);
 
 	// Hive convention: partition columns live in the directory names, not in the files
-	CopyFunctionBindInput bind_input(*copy_info);
+	CopyFunctionBindInput bind_input(*copy_info, copy_function->function.function_info);
 	bind_input.file_extension = format_name;
 	if (file_format == HiveFileFormat::PARQUET) {
 		// named after the codec, as Spark and Hive name them (<name>.snappy.parquet): readers that list the files can
