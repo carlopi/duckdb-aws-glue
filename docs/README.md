@@ -91,7 +91,10 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   layout. Files and directories named `_*` or `.*`, `*_$folder$` directory markers and objects the listing reports as
   zero bytes are skipped.
   When one partition's location lies inside another's,
-  a file belongs to the deepest one. A table without data files (just created) scans as empty.
+  a file belongs to the deepest one. A location two or more partitions are registered at is refused when a query
+  reads one of them and the location holds data files: Hive engines read such a file once for each partition, which
+  DuckDB does not. `s3a://` and `s3n://` locations name the same bucket and key as `s3://`, and a location is read as
+  registered, including a `//` in its path. A table without data files (just created) scans as empty.
 - A partitioned table with Athena partition projection (`projection.enabled = true`) is refused on read and write
   rather than scanned: Athena derives its partitions from the `projection.*` parameters and ignores the registered
   ones, which such a table usually has none of, so a scan would silently read nothing. To read it, set
@@ -101,10 +104,14 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   build side when the scan starts, are applied to the partition values first, so only the partitions a query reads
   are listed (EXPLAIN shows the partitions kept as `Scanning Files`). A filter the partition values decide is
   true of every row the scan then reads, and is dropped from the plan, as for `read_parquet` with hive
-  partitioning. When a query reads at least
-  `hive_partition_listing_threshold` (default 10) partitions below the table location, the location is listed once,
-  recursively (one S3 request per 1000 keys), and the files are matched to their partitions by prefix; fewer
-  partitions, and partitions at custom locations, are listed one directory each. A directory is listed once per
+  partitioning. The partitions read below the table location are
+  listed in whichever way takes fewer rounds of requests: the location once, recursively (one S3 request per 1000
+  keys, one after another), with the files matched to their partitions by prefix, or each partition on its own,
+  several at the same time. On a tie the location is listed when that makes a tenth of the requests, so a table
+  of up to 1000 partitions lists its location from 10 partitions read (or fewer, when they take more than one round). The estimate assumes one file per partition;
+  `SET hive_partition_listing_threshold = n` replaces it with a fixed rule (the location from n partitions read).
+  Partitions at custom locations are always listed on their own. They are listed as tasks on DuckDB's threads, as many at a time as
+  `SET threads`. A directory is listed once per
   query, shared by every scan of it and the cardinality sample. With `SET glue_cache_listings = true` (default
   false) the listing is kept for later statements of the connection as well, held and cleared like the metadata
   cache (`glue_metadata_cache_scope`, writes through the extension, rollback, DETACH) — so files added any other way
@@ -176,8 +183,9 @@ their codec themselves.
   string, `\N` for LazySimpleSerDe unless `serialization.null.format` says otherwise, and at most one header line) and register new partition directories in Glue with
   BatchCreatePartition. New partitions get `<key>=<value>` directories; rows of an existing partition are written to
   its registered location, which may be any directory below the table location (e.g. `<table>/2024/01`). Inserting
-  into a partition whose location is not below the table location fails; the rows of other partitions can still be
-  inserted. Glue errors on single partitions that may pass (throttling, internal errors) are retried; when Glue
+  into a partition whose location is not below the table location, or whose location has an empty or `.` segment (`//`, `/./`) DuckDB
+  can not write, fails, and so does inserting rows whose directory is the location of another partition; the rows of
+  other partitions can still be inserted. Glue errors on single partitions that may pass (throttling, internal errors) are retried; when Glue
   still refuses a partition, the write is rolled back by deleting the files it wrote (the partitions it registered
   stay, empty), so the statement can be run again without adding its
   rows twice. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
@@ -367,8 +375,10 @@ ALTER TABLE my_datalake.default.orders SET LOCATION 's3://bucket/orders_v2/';
 
 Actions can be chained in one statement (`ADD PARTITION (...) LOCATION '...' ADD PARTITION (...) ...`). The statement
 becomes `CALL glue_alter_table(table, [actions])`: every action is checked against Glue before any is applied, so a
-statement that fails changes nothing, and consecutive adds go out as one `BatchCreatePartition` call. The table name
-may be partially qualified; it is resolved like in a query.
+statement that fails changes nothing, and consecutive adds go out as one `BatchCreatePartition` call. The checks fetch
+the partitions they look at with `BatchGetPartition`, and consecutive drops go out as `BatchDeletePartition` calls of
+up to 25 partitions, so dropping partitions needs `glue:BatchGetPartition` and `glue:BatchDeletePartition`. The table
+name may be partially qualified; it is resolved like in a query.
 
 `glue_partitions` lists every registered partition with a typed column per partition key, its `location` and
 `partition_values`, the strings Glue stores. A typed column is NULL for the NULL partition (Glue stores
@@ -438,6 +448,31 @@ SELECT request.type, request.url, request.headers['x-amz-target'], response.stat
 ```
 
 `SET glue_network_calls_via_duckdb = false` switches back to the SDK's own HTTP client.
+
+`glue_requests()` lists the Glue requests in the `HTTP` log, retries and pages included: `operation` (the
+`X-Amz-Target`, e.g. `AWSGlue.GetPartitions`), `status`, `reason`, `start_time`, `duration_ms` and the
+`connection_id`, `transaction_id` and `query_id` that made them. Only requests sent through DuckDB's HTTP layer are
+logged.
+
+The `GlueScan` log type (`INFO`) records what each scan of a Hive table does, one entry per `event`, with the
+`scan_id` that numbers the scans of a query from 1:
+
+- `partitions`: the table's `partitions` were loaded, taking `duration_ms`;
+- `plan`: of `partitions`, `partitions_read` are read, with `listings` S3 listings; `detail` is `root` when they are
+  listed in one listing of the table location, else `partitions`;
+- `listing`: one listing (`detail`: `table`, `root` or `partition`) of `partitions_read` partitions found `files`
+  data files in `duration_ms`;
+- `sample`: the cardinality sample listed `files` files and measured one in `duration_ms` (`files` is NULL when
+  nothing was listed: avro tables are not sampled). The scan reuses that listing, so a `listing` of the same
+  directory then takes next to no time. Every scan of the table in the query shares the one sample.
+
+```sql
+CALL enable_logging(['HTTP', 'GlueScan'], storage = 'memory');
+-- ... run queries ...
+SELECT operation, count(*), sum(duration_ms) FROM glue_requests() GROUP BY operation;
+SELECT "table", scan_id, event, partitions, partitions_read, listings, files, duration_ms, detail
+FROM duckdb_logs_parsed('GlueScan');
+```
 
 ## Testing
 

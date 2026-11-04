@@ -10,6 +10,7 @@
 #include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/function/function_binder.hpp"
+#include "duckdb/function/scalar/generic_functions.hpp"
 #include "duckdb/function/scalar/string_functions.hpp"
 #include "duckdb/planner/expression/bound_case_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
@@ -30,6 +31,7 @@
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "core/glue_types.hpp"
+#include "core/hive_location.hpp"
 #include "execution/hive_copy.hpp"
 
 namespace duckdb {
@@ -102,20 +104,35 @@ static optional_ptr<CopyFunctionCatalogEntry> TryGetCopyFunction(DatabaseInstanc
 	return &entry->Cast<CopyFunctionCatalogEntry>();
 }
 
-//! The directory of a partition relative to the table location, empty if the partition is not below it
-static string RelativePartitionPath(const string &table_location, const string &partition_location) {
-	auto prefix = table_location + "/";
-	if (!StringUtil::StartsWith(partition_location, prefix)) {
+//! The directory of a partition relative to the table location, empty if the partition is not below it. s3a:// and
+//! s3:// name the same bucket and key. 'writable' is false when the directory has an empty or '.' segment ('t//p=x'):
+//! the copy drops those, so it would write the files to another directory than the one the partition is read from.
+static string RelativePartitionPath(const string &table_location, const string &partition_location, bool &writable) {
+	writable = true;
+	auto prefix = ComparableLocation(table_location) + "/";
+	auto location = ComparableLocation(partition_location);
+	if (!StringUtil::StartsWith(location, prefix)) {
 		return string();
 	}
-	// normalized like the copy does, so the directories of the written files match
 	vector<string> components;
-	for (auto &component : StringUtil::Split(partition_location.substr(prefix.size()), '/')) {
-		if (!component.empty() && component != ".") {
+	for (auto &component : StringUtil::Split(location.substr(prefix.size()), '/')) {
+		if (component.empty() || component == ".") {
+			writable = false;
+		} else {
 			components.push_back(component);
 		}
 	}
 	return StringUtil::Join(components, "/");
+}
+
+//! A VARCHAR expression that fails the query with 'message' when it is evaluated
+static unique_ptr<Expression> ErrorExpression(ClientContext &context, FunctionBinder &function_binder,
+                                              const string &message) {
+	vector<unique_ptr<Expression>> children;
+	children.push_back(make_uniq<BoundConstantExpression>(Value(message)));
+	return BoundCastExpression::AddCastToType(
+	    context, function_binder.BindScalarFunction(ErrorFun::GetFunction(), std::move(children)),
+	    LogicalType::VARCHAR);
 }
 
 //! The PARTITION_PATH of the copy: the hive layout (<key>=<value>/...), except for the existing partitions registered
@@ -148,6 +165,7 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 	auto &glue_catalog = existing_table->catalog.Cast<GlueCatalog>();
 	auto partitions = GlueAPI::GetPartitions(context, glue_catalog, table_info.schema_name, table_info.name);
 	auto result = make_uniq<BoundCaseExpression>(LogicalType::VARCHAR);
+	vector<pair<string, vector<string>>> custom_directories;
 	for (auto &partition : partitions) {
 		if (partition.values.size() != partition_columns.size()) {
 			throw InvalidInputException("Partition [%s] of Hive table '%s' has %d values, but the table has %d "
@@ -169,8 +187,9 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 			    ExpressionType::COMPARE_NOT_DISTINCT_FROM, make_uniq<BoundReferenceExpression>(types[column_index], i),
 			    make_uniq<BoundConstantExpression>(std::move(value))));
 		}
-		auto relative_path = RelativePartitionPath(location, partition.location);
-		if (relative_path == hive_directory) {
+		bool writable;
+		auto relative_path = RelativePartitionPath(location, partition.location, writable);
+		if (relative_path == hive_directory && writable) {
 			continue;
 		}
 		BoundCaseCheck check;
@@ -181,13 +200,35 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 			conjunction->GetChildrenMutable() = std::move(conditions);
 			check.when_expr = std::move(conjunction);
 		}
-		if (relative_path.empty()) {
+		if (!writable) {
+			check.then_expr = ErrorExpression(
+			    context, function_binder,
+			    StringUtil::Format("INSERT into Hive table '%s.%s' is not supported: partition [%s] is registered at "
+			                       "'%s', whose path has an empty or '.' segment, and DuckDB can not write to it",
+			                       table_info.schema_name, table_info.name, StringUtil::Join(partition.values, ", "),
+			                       partition.location));
+		} else if (relative_path.empty()) {
 			// the copy rejects a partition path that is not below its target
 			check.then_expr = make_uniq<BoundConstantExpression>(Value(partition.location));
 		} else {
 			check.then_expr = make_uniq<BoundConstantExpression>(Value(relative_path));
 			partition_directories.emplace(location + "/" + relative_path, partition.values);
+			custom_directories.emplace_back(relative_path, partition.values);
 		}
+		result->CaseChecksMutable().push_back(std::move(check));
+	}
+	// after the checks of the existing partitions: rows whose own directory is the location of another partition
+	// would be written there and read back as that partition
+	for (auto &custom : custom_directories) {
+		BoundCaseCheck check;
+		check.when_expr = BoundComparisonExpression::Create(ExpressionType::COMPARE_EQUAL, hive_path->Copy(),
+		                                                    make_uniq<BoundConstantExpression>(Value(custom.first)));
+		check.then_expr = ErrorExpression(
+		    context, function_binder,
+		    StringUtil::Format("INSERT into Hive table '%s.%s' is not supported: rows would be written to '%s', the "
+		                       "location of partition [%s], and read back as that partition",
+		                       table_info.schema_name, table_info.name, custom.first,
+		                       StringUtil::Join(custom.second, ", ")));
 		result->CaseChecksMutable().push_back(std::move(check));
 	}
 	if (result->CaseChecks().empty()) {
