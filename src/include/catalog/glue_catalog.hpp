@@ -21,7 +21,7 @@ namespace duckdb {
 class GlueTable;
 
 //! The outcome of looking a table up before its schema (GlueCatalog::TryLookupTableBeforeSchema)
-enum class TableFirstLookup : uint8_t {
+enum class TableLookup : uint8_t {
 	//! not a lookup it applies to, or the schema is already held: the regular lookup runs
 	SKIPPED,
 	//! the table exists, so its schema does too
@@ -128,8 +128,8 @@ private:
 	CatalogEntryLookup TryLookupEntryInternal(CatalogTransaction transaction,
 	                                          const EntryLookupInfo &lookup_info) override;
 	//! Looks the table up before its schema; with SKIPPED the regular lookup runs instead
-	TableFirstLookup TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
-	                                            CatalogEntryLookup &result);
+	TableLookup TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
+	                                       CatalogEntryLookup &result);
 
 private:
 	//! for reading - the fetched catalog id or account id from ATTACH
