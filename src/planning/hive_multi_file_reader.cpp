@@ -27,6 +27,7 @@
 #include "duckdb/execution/operator/csv_scanner/csv_reader_options.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/function/function_binder.hpp"
+#include "duckdb/planner/expression/bound_case_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
@@ -43,6 +44,7 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
+#include "duckdb/parser/expression/case_expression.hpp"
 #include "duckdb/parser/expression/cast_expression.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/expression/comparison_expression.hpp"
@@ -1600,6 +1602,40 @@ static void MakeFalseUnlessTrue(ClientContext &context, unique_ptr<Expression> &
 	                                         make_uniq<BoundConstantExpression>(Value("true")));
 }
 
+static unique_ptr<Expression> BindTextFunction(ClientContext &context, const char *name,
+                                               vector<unique_ptr<Expression>> children) {
+	FunctionBinder function_binder(context);
+	ErrorData error;
+	auto function =
+	    function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier(name), std::move(children), error);
+	if (!function) {
+		error.Throw();
+	}
+	return function;
+}
+
+//! Drop the escape character read_csv does not apply from a field's text, before the text is converted; only a field
+//! that holds it goes through regexp_replace
+static void UnescapeField(ClientContext &context, unique_ptr<Expression> &expr, const HiveCSVOptions &options) {
+	auto &text = BoundCastExpression::IsCast(*expr)
+	                 ? BoundCastExpression::ChildMutable(expr->Cast<BoundFunctionExpression>())
+	                 : expr;
+	if (text->GetReturnType() != LogicalType::VARCHAR || text->IsFoldable()) {
+		return;
+	}
+	vector<unique_ptr<Expression>> contains;
+	contains.push_back(text->Copy());
+	contains.push_back(make_uniq<BoundConstantExpression>(Value(options.field_escape)));
+	vector<unique_ptr<Expression>> replace;
+	replace.push_back(text->Copy());
+	replace.push_back(make_uniq<BoundConstantExpression>(Value(options.FieldEscapePattern())));
+	replace.push_back(make_uniq<BoundConstantExpression>(Value("\\1")));
+	replace.push_back(make_uniq<BoundConstantExpression>(Value("g")));
+	text = make_uniq<BoundCaseExpression>(BindTextFunction(context, "contains", std::move(contains)),
+	                                      BindTextFunction(context, "regexp_replace", std::move(replace)),
+	                                      std::move(text));
+}
+
 ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &reader_data,
                                                            const MultiFileBindData &bind_data,
                                                            const vector<MultiFileColumnDefinition> &global_columns,
@@ -1635,6 +1671,9 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
 	for (auto &expr : reader_data.expressions) {
 		if (!expr) {
 			continue;
+		}
+		if (!csv_options.field_escape.empty()) {
+			UnescapeField(context, expr, csv_options);
 		}
 		switch (csv_options.FieldConversion(expr->GetReturnType())) {
 		case HiveFieldConversion::NONE:
@@ -1714,6 +1753,28 @@ static unique_ptr<ParsedExpression> BarredField(const Identifier &name) {
 	return make_uniq<FunctionExpression>(Identifier("__internal_barrier"), std::move(field));
 }
 
+//! A field's text with the escape character read_csv does not apply dropped, as InitializeReader reads it
+static unique_ptr<ParsedExpression> UnescapedField(const HiveCSVOptions &options, unique_ptr<ParsedExpression> field) {
+	if (options.field_escape.empty()) {
+		return field;
+	}
+	vector<unique_ptr<ParsedExpression>> contains;
+	contains.push_back(field->Copy());
+	contains.push_back(ConstantExpression::FromValue(Value(options.field_escape)));
+	vector<unique_ptr<ParsedExpression>> replace;
+	replace.push_back(field->Copy());
+	replace.push_back(ConstantExpression::FromValue(Value(options.FieldEscapePattern())));
+	replace.push_back(ConstantExpression::FromValue(Value("\\1")));
+	replace.push_back(ConstantExpression::FromValue(Value("g")));
+	auto unescaped = make_uniq<CaseExpression>();
+	CaseCheck check;
+	check.when_expr = make_uniq<FunctionExpression>(Identifier("contains"), std::move(contains));
+	check.then_expr = make_uniq<FunctionExpression>(Identifier("regexp_replace"), std::move(replace));
+	unescaped->CaseChecksMutable().push_back(std::move(check));
+	unescaped->ElseMutable() = std::move(field);
+	return std::move(unescaped);
+}
+
 //! A data column of the scan, of the table's type, as an expression over the reader's column: the conversion of a field
 //! read as text that InitializeReader gives the scan (HiveCSVOptions::FieldConversion)
 static unique_ptr<ParsedExpression> ReaderColumn(const HiveScanInfo &info, const Identifier &name,
@@ -1721,19 +1782,24 @@ static unique_ptr<ParsedExpression> ReaderColumn(const HiveScanInfo &info, const
 	if (info.file_format != HiveFileFormat::CSV || !info.csv_options.serde_fields) {
 		return make_uniq<ColumnRefExpression>(name);
 	}
+	auto &options = info.csv_options;
 	unique_ptr<ParsedExpression> column;
-	switch (info.csv_options.FieldConversion(type)) {
+	switch (options.FieldConversion(type)) {
 	case HiveFieldConversion::NONE:
-		return make_uniq<ColumnRefExpression>(name);
+		if (options.field_escape.empty()) {
+			return make_uniq<ColumnRefExpression>(name);
+		}
+		column = UnescapedField(options, make_uniq<ColumnRefExpression>(name));
+		break;
 	case HiveFieldConversion::CAST:
-		column = make_uniq<CastExpression>(type, BarredField(name), false);
+		column = make_uniq<CastExpression>(type, UnescapedField(options, BarredField(name)), false);
 		break;
 	case HiveFieldConversion::TRY_CAST:
-		column = make_uniq<CastExpression>(type, BarredField(name), true);
+		column = make_uniq<CastExpression>(type, UnescapedField(options, BarredField(name)), true);
 		break;
 	case HiveFieldConversion::FALSE_UNLESS_TRUE: {
 		vector<unique_ptr<ParsedExpression>> lower;
-		lower.push_back(BarredField(name));
+		lower.push_back(UnescapedField(options, BarredField(name)));
 		column = make_uniq<ComparisonExpression>(ExpressionType::COMPARE_EQUAL,
 		                                         make_uniq<FunctionExpression>(Identifier("lower"), std::move(lower)),
 		                                         ConstantExpression::FromValue(Value("true")));

@@ -339,6 +339,14 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 	    GetSerDe() != HiveSerDe::OPEN_CSV || (TryGetProperty("use.null.for.invalid.data", null_for_invalid_data) &&
 	                                          StringUtil::CIEquals(null_for_invalid_data, "true"));
 	options.false_unless_true = GetSerDe() == HiveSerDe::OPEN_CSV;
+	// OpenCSVSerde reads with a '\' escape unless escapeChar is another character than '"' (Trino); read_csv, which
+	// is given the quote character, would keep the backslash
+	string escape_char;
+	auto escape_set = TryGetProperty("escapeChar", escape_char) && !escape_char.empty();
+	if (GetSerDe() == HiveSerDe::OPEN_CSV && options.escape == options.quote &&
+	    (!escape_set || options.escape == "\"") && options.delimiter != "\\" && options.quote != "\\") {
+		options.field_escape = "\\";
+	}
 	return options;
 }
 

@@ -206,7 +206,7 @@ has 'skip.footer.line.count' set, which DuckDB can not read or write
 #---------------------------------------------------------------------------
 # tables this extension writes; a table property overrides the SerDe property of the same name
 #---------------------------------------------------------------------------
-foreach table formats_csv_byte_delim formats_csv_empty_null formats_csv_backslash_n formats_csv_opencsv formats_csv_opencsv_bool formats_csv_header_ctas formats_csv_bad formats_csv_signed_delim formats_csv_wide formats_csv_nested formats_csv_zeros
+foreach table formats_csv_byte_delim formats_csv_empty_null formats_csv_backslash_n formats_csv_opencsv formats_csv_opencsv_bool formats_csv_opencsv_escape formats_csv_opencsv_escape_write formats_csv_header_ctas formats_csv_bad formats_csv_signed_delim formats_csv_wide formats_csv_nested formats_csv_zeros
 
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.{table};
@@ -359,6 +359,58 @@ SELECT id, flag FROM my_datalake.default.formats_csv_opencsv_bool WHERE id IN (4
 ----
 4	false
 5	false
+
+# OpenCSVSerde reads with a '\' escape (escapeChar '"' reads as '\' too): an escape is dropped, and the escape or quote
+# character after it is kept, in a quoted field or not and before a field is converted to its column's type; outside
+# quotes it does not escape the separator
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_opencsv_escape (id INTEGER, val VARCHAR, n INTEGER) WITH (format = 'csv', quote = '"');
+
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('1,\'),
+    ('2,a\x'),
+    ('3,a\\b'),
+    ('4,"a\\b"'),
+    ('5,"a\x"'),
+    ('6,a\"b'),
+    ('7,"x"'),
+    ('8,y,1\2'),
+    ('9,a\,7')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_opencsv_escape/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query III
+SELECT id, val, n FROM my_datalake.default.formats_csv_opencsv_escape ORDER BY id;
+----
+1	(empty)	NULL
+2	ax	NULL
+3	a\b	NULL
+4	a\b	NULL
+5	ax	NULL
+6	a"b	NULL
+7	x	NULL
+8	y	12
+9	a	7
+
+# a written backslash is doubled, so that it reads back as one
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_opencsv_escape_write (id INTEGER, val VARCHAR) WITH (format = 'csv', quote = '"');
+
+statement ok
+INSERT INTO my_datalake.default.formats_csv_opencsv_escape_write VALUES (1, 'a\b'), (2, '\'), (3, 'x\"y'), (4, '\\');
+
+query I
+SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_opencsv_escape_write/*.csv');
+----
+"1","a\\b"<nl>"2","\\"<nl>"3","x\\""y"<nl>"4","\\\\"<nl>
+
+query II
+SELECT id, val FROM my_datalake.default.formats_csv_opencsv_escape_write ORDER BY id;
+----
+1	a\b
+2	\
+3	x\"y
+4	\\
 
 # a separator of more than one byte can be read, but not written
 statement ok
@@ -586,7 +638,7 @@ DROP TABLE my_datalake.default.formats_json_lines;
 
 endloop
 
-foreach table formats_csv_two_headers formats_csv_footer formats_csv_byte_delim formats_csv_empty_null formats_csv_backslash_n formats_csv_opencsv formats_csv_opencsv_bool formats_csv_header_ctas
+foreach table formats_csv_two_headers formats_csv_footer formats_csv_byte_delim formats_csv_empty_null formats_csv_backslash_n formats_csv_opencsv formats_csv_opencsv_bool formats_csv_opencsv_escape formats_csv_opencsv_escape_write formats_csv_header_ctas
 
 statement ok
 DROP TABLE my_datalake.default.{table};

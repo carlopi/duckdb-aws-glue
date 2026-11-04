@@ -93,6 +93,24 @@ static unique_ptr<Expression> CheckedTextField(ClientContext &context, unique_pt
 	return make_uniq<BoundCaseExpression>(std::move(refused), std::move(raise), std::move(text));
 }
 
+//! A value's text with 'escape' doubled, which a reader that drops an unpaired escape character (OpenCSVSerde) reads
+//! back as one
+static unique_ptr<Expression> EscapedTextField(ClientContext &context, unique_ptr<Expression> text,
+                                               const string &escape) {
+	vector<unique_ptr<Expression>> children;
+	children.push_back(std::move(text));
+	children.push_back(make_uniq<BoundConstantExpression>(Value(escape)));
+	children.push_back(make_uniq<BoundConstantExpression>(Value(escape + escape)));
+	FunctionBinder function_binder(context);
+	ErrorData error;
+	auto escaped = function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("replace"),
+	                                                  std::move(children), error);
+	if (!escaped) {
+		error.Throw();
+	}
+	return escaped;
+}
+
 static optional_ptr<CopyFunctionCatalogEntry> TryGetCopyFunction(DatabaseInstance &db, const string &name) {
 	auto &system_catalog = Catalog::GetSystemCatalog(db);
 	auto data = CatalogTransaction::GetSystemTransaction(db);
@@ -351,6 +369,7 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		                     : StringUtil::Format("holds the field delimiter '%s' or a line break, or is the table's "
 		                                          "NULL string '%s'",
 		                                          DelimiterToString(delimiter), null_string);
+		auto field_escape = table_info.GetCSVOptions().field_escape;
 		vector<unique_ptr<Expression>> select_list;
 		vector<LogicalType> projected_types;
 		for (idx_t i = 0; i < names.size(); i++) {
@@ -363,6 +382,9 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 				// only unquoted fields can not tell the NULL string from NULL
 				column =
 				    CheckedTextField(context, std::move(column), forbidden, quoted ? nullptr : &null_string, message);
+				if (!field_escape.empty()) {
+					column = EscapedTextField(context, std::move(column), field_escape);
+				}
 				copy_types[i] = LogicalType::VARCHAR;
 			}
 			projected_types.push_back(column->GetReturnType());

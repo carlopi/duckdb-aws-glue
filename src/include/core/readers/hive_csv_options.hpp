@@ -39,10 +39,15 @@ struct HiveCSVOptions {
 	bool null_for_invalid_data = true;
 	//! With serde_fields: a boolean field is true when it is 'true' in any case and false otherwise, never an error
 	bool false_unless_true = false;
+	//! With serde_fields: an escape character read_csv does not apply, dropped from a field's text; the escape or quote
+	//! character after it is kept
+	string field_escape;
 
 public:
 	//! With serde_fields: how a field becomes a value of a column of 'type', in the scan and in its reader call
 	HiveFieldConversion FieldConversion(const LogicalType &type) const;
+	//! The regexp_replace pattern that drops field_escape from a field's text, with '\1' the character it escapes
+	string FieldEscapePattern() const;
 	bool operator==(const HiveCSVOptions &other) const;
 	bool operator!=(const HiveCSVOptions &other) const;
 	void Serialize(Serializer &serializer) const;
