@@ -141,11 +141,14 @@ private:
 	vector<OpenFileInfo> SampleRootPartitions(const vector<idx_t> &partitions) const;
 	//! Index every registered partition location, including pruned ones, so attribution does not depend on filters
 	void BuildPartitionLocations() const;
+	//! Refuse to read a file attributed to 'owner' when its location is one two or more partitions are registered at
+	//! and one of them is in 'reading'
+	void ThrowIfLocationShared(idx_t owner, const unordered_set<idx_t> &reading) const;
 	//! The partition of the deepest registered location containing the file, searching no shorter than
-	//! 'min_directory_size'
+	//! 'min_directory_size' characters of its ComparableLocation
 	optional_idx OwningPartition(const string &file_path, idx_t min_directory_size) const;
-	//! Add a listed file of the partition unless this list already has it (two partitions sharing a location: the
-	//! file belongs to the first). Called with HiveScanInfo::file_partitions_lock held.
+	//! Add a listed file of the partition unless this list already has it. Called with
+	//! HiveScanInfo::file_partitions_lock held.
 	void AddFile(OpenFileInfo file, idx_t partition_index) const;
 
 private:
@@ -162,8 +165,12 @@ private:
 	mutable idx_t next_job = 0;
 	//! The paths already in 'expanded_files'
 	mutable unordered_set<string> listed_files;
-	//! Registered partition location (without trailing '/') to its index in HiveScanInfo::Partitions()
+	//! ComparableLocation of a registered partition location to its index in HiveScanInfo::Partitions(): the first
+	//! partition registered there
 	mutable unordered_map<string, idx_t> partition_by_location;
+	//! For a location two or more partitions are registered at: the first of them (its entry in partition_by_location,
+	//! which files there are attributed to) to all of them
+	mutable unordered_map<idx_t, vector<idx_t>> shared_locations;
 	mutable bool partition_locations_built = false;
 };
 

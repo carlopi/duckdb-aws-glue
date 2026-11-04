@@ -1,4 +1,5 @@
 #include "planning/hive_multi_file_reader.hpp"
+#include "core/hive_location.hpp"
 #include "planning/hive_query_cache.hpp"
 #include "planning/stats/hive_stats.hpp"
 #include "core/glue_log_types.hpp"
@@ -346,16 +347,17 @@ void HiveMultiFileList::PlanListings() const {
 		return;
 	}
 	// the partitions below the table root can be listed together
-	auto root = scan_info->root_location;
-	StringUtil::RTrim(root, "/");
+	auto root = ComparableLocation(scan_info->root_location);
 	vector<idx_t> below_root;
 	vector<idx_t> elsewhere;
 	auto partitions = scan_info->Partitions(client_context);
 	auto indexes = PartitionIndexes();
 	for (auto partition_index : *indexes) {
-		auto location = (*partitions)[partition_index].location;
-		StringUtil::RTrim(location, "/");
-		if (!root.empty() && location.size() > root.size() + 1 && StringUtil::StartsWith(location, root + "/")) {
+		auto location = ComparableLocation((*partitions)[partition_index].location);
+		// a location with an empty segment below the root ('t//p=x') holds files the root listing leaves out
+		bool empty_segment = location.find("//", root.size() + 1) != string::npos;
+		if (!root.empty() && location.size() > root.size() + 1 && StringUtil::StartsWith(location, root + "/") &&
+		    !empty_segment) {
 			below_root.push_back(partition_index);
 		} else {
 			elsewhere.push_back(partition_index);
@@ -412,23 +414,53 @@ void HiveMultiFileList::BuildPartitionLocations() const {
 	}
 	partition_locations_built = true;
 	auto partitions = scan_info->Partitions(client_context);
+	unordered_map<string, vector<idx_t>> partitions_by_location;
 	for (idx_t i = 0; i < partitions->size(); i++) {
-		auto location = (*partitions)[i].location;
-		StringUtil::RTrim(location, "/");
+		auto location = ComparableLocation((*partitions)[i].location);
 		if (location.empty()) {
 			continue;
 		}
-		// two partitions on the same location: the first wins, as in AddFile
-		partition_by_location.emplace(std::move(location), i);
+		partition_by_location.emplace(location, i);
+		partitions_by_location[location].push_back(i);
+	}
+	for (auto &entry : partitions_by_location) {
+		if (entry.second.size() > 1) {
+			auto first = entry.second[0];
+			shared_locations.emplace(first, std::move(entry.second));
+		}
 	}
 }
 
+void HiveMultiFileList::ThrowIfLocationShared(idx_t owner, const unordered_set<idx_t> &reading) const {
+	auto shared = shared_locations.find(owner);
+	if (shared == shared_locations.end()) {
+		return;
+	}
+	auto &sharing = shared->second;
+	bool read = false;
+	for (auto index : sharing) {
+		read = read || reading.count(index) > 0;
+	}
+	if (!read) {
+		return;
+	}
+	auto partitions = scan_info->Partitions(client_context);
+	// a file would belong to one of the partitions here, while Hive engines read it once for each of them
+	throw NotImplementedException("Partitions [%s] and [%s] of Hive table '%s' are registered at the same location "
+	                              "'%s', which holds data files DuckDB can not read: register each partition at its "
+	                              "own location",
+	                              StringUtil::Join((*partitions)[sharing[0]].values, ", "),
+	                              StringUtil::Join((*partitions)[sharing[1]].values, ", "), scan_info->Describe(),
+	                              (*partitions)[owner].location);
+}
+
 optional_idx HiveMultiFileList::OwningPartition(const string &file_path, idx_t min_directory_size) const {
-	auto separator = file_path.find_last_of('/');
+	auto path = ComparableLocation(file_path);
+	auto separator = path.find_last_of('/');
 	if (separator == string::npos) {
 		return optional_idx();
 	}
-	auto directory = file_path.substr(0, separator);
+	auto directory = path.substr(0, separator);
 	while (directory.size() >= min_directory_size) {
 		auto entry = partition_by_location.find(directory);
 		if (entry != partition_by_location.end()) {
@@ -471,14 +503,18 @@ void HiveMultiFileList::ListPartitions(const vector<idx_t> &partition_indexes) c
 	executor.ScheduleTasks(std::move(tasks));
 	executor.WorkOnTasks();
 	BuildPartitionLocations();
+	unordered_set<idx_t> reading(partition_indexes.begin(), partition_indexes.end());
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (idx_t i = 0; i < locations.size(); i++) {
+		auto comparable_size = ComparableLocation(locations[i]).size();
 		for (auto &file : listed[i]) {
 			// skip files of another partition registered at a location nested inside this one
-			auto owner = OwningPartition(file.path, locations[i].size());
+			auto owner = OwningPartition(file.path, comparable_size);
 			if (owner.IsValid() && owner.GetIndex() != partition_indexes[i]) {
+				ThrowIfLocationShared(owner.GetIndex(), reading);
 				continue;
 			}
+			ThrowIfLocationShared(partition_indexes[i], reading);
 			AddFile(std::move(file), partition_indexes[i]);
 		}
 	}
@@ -519,13 +555,18 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 	}
 	BuildPartitionLocations();
 	auto root_prefix = root + "/";
+	auto comparable_size = ComparableLocation(root).size() + 1;
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : files) {
 		if (!IsDataFile(file, root_prefix)) {
 			continue;
 		}
-		auto partition_index = OwningPartition(file.path, root.size() + 1);
-		if (!partition_index.IsValid() || !reading.count(partition_index.GetIndex())) {
+		auto partition_index = OwningPartition(file.path, comparable_size);
+		if (!partition_index.IsValid()) {
+			continue;
+		}
+		ThrowIfLocationShared(partition_index.GetIndex(), reading);
+		if (!reading.count(partition_index.GetIndex())) {
 			continue;
 		}
 		AddFile(std::move(file), partition_index.GetIndex());
@@ -632,9 +673,10 @@ vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 	ListDataFiles(client_context, CacheListings(client_context, *scan_info), location, listed);
 	// as ListPartitions keeps them: not the files of a partition registered at a location nested inside this one
 	BuildPartitionLocations();
+	auto comparable_size = ComparableLocation(location).size();
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : listed) {
-		auto owner = OwningPartition(file.path, location.size());
+		auto owner = OwningPartition(file.path, comparable_size);
 		if (owner.IsValid() && owner.GetIndex() != partition_index) {
 			continue;
 		}
@@ -648,6 +690,7 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 	auto root = scan_info->root_location;
 	StringUtil::RTrim(root, "/");
 	auto root_prefix = root + "/";
+	auto comparable_root_size = ComparableLocation(root).size() + 1;
 	auto listing = HiveQueryCache::Get(client_context)
 	                   ->GetDirectoryListing(client_context, root, CacheListings(client_context, *scan_info));
 	unordered_set<idx_t> reading(partitions.begin(), partitions.end());
@@ -680,12 +723,12 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 		if (!IsDataFile(file, root_prefix)) {
 			continue;
 		}
-		in_sampled = sampled.IsValid() && StringUtil::StartsWith(file.path, sampled_prefix);
+		in_sampled = sampled.IsValid() && StringUtil::StartsWith(ComparableLocation(file.path), sampled_prefix);
 		if (scan.scan_type == MultiFileListScanType::ALWAYS_FETCH && sampled.IsValid() && !in_sampled) {
 			// pages come in key order, so the sampled partition's files are all seen
 			break;
 		}
-		auto owner = OwningPartition(file.path, root_prefix.size());
+		auto owner = OwningPartition(file.path, comparable_root_size);
 		if (!owner.IsValid()) {
 			continue;
 		}
@@ -695,9 +738,8 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 		}
 		if (!sampled.IsValid() && reading.count(owner.GetIndex())) {
 			sampled = owner;
-			sampled_prefix = (*scan_info->Partitions(client_context))[owner.GetIndex()].location;
-			StringUtil::RTrim(sampled_prefix, "/");
-			sampled_prefix += "/";
+			sampled_prefix =
+			    ComparableLocation((*scan_info->Partitions(client_context))[owner.GetIndex()].location) + "/";
 			in_sampled = true;
 		}
 		files.push_back(file);
