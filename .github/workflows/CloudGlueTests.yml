@@ -163,7 +163,7 @@ jobs:
       - name: Test config
         run: |
           jq --arg catalog "$GLUE_CATALOG_ID" --arg region "$GLUE_REGION" --arg location "$DEFAULT_S3_LOCATION" '
-            .on_init = "CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION '"'"'\($region)'"'"');"
+            .on_init |= sub("REGION '"'"'[^'"'"']*'"'"'"; "REGION '"'"'\($region)'"'"'")
             | .test_env |= map(
                 if .env_name == "GLUE_CATALOG_ID" then .env_value = $catalog
                 elif .env_name == "DEFAULT_S3_LOCATION" then .env_value = $location
