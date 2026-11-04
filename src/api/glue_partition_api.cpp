@@ -87,7 +87,7 @@ bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const s
 	result.input_format = ToStdString(storage_descriptor.GetInputFormat());
 	result.serde_library = ToStdString(storage_descriptor.GetSerdeInfo().GetSerializationLibrary());
 	result.serde_parameters = ToStdMap(storage_descriptor.GetSerdeInfo().GetParameters());
-	result.columns = ToColumns(storage_descriptor.GetColumns());
+	result.partition_columns = ToColumns(storage_descriptor.GetColumns());
 	result.parameters = ToStdMap(partition.GetParameters());
 	result.fetched = make_shared_ptr<const GlueFetchedPartition>(partition);
 	if (raw_json) {
@@ -225,7 +225,7 @@ static void FetchPartitionSegment(Aws::Glue::GlueClient &client, const GlueCatal
 			info.input_format = ToStdString(storage_descriptor.GetInputFormat());
 			info.serde_library = ToStdString(storage_descriptor.GetSerdeInfo().GetSerializationLibrary());
 			info.serde_parameters = ToStdMap(storage_descriptor.GetSerdeInfo().GetParameters());
-			info.columns = ToColumns(storage_descriptor.GetColumns());
+			info.partition_columns = ToColumns(storage_descriptor.GetColumns());
 			result.push_back(std::move(info));
 		}
 		next_token = partitions.GetNextToken();

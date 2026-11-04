@@ -991,7 +991,7 @@ void GlueGetPartitionResponseScan(ClientContext &context, TableFunctionInput &da
 	output.data[2].Append(Value::LIST(LogicalType::VARCHAR, std::move(values)));
 	output.data[3].Append(Value(partition.location));
 	output.data[4].Append(Value(partition.serde_library));
-	output.data[5].Append(GlueColumnsToValue(partition.columns));
+	output.data[5].Append(GlueColumnsToValue(partition.partition_columns));
 	output.data[6].Append(GlueParametersToValue(partition.parameters));
 	output.data[7].Append(GlueParametersToValue(partition.serde_parameters));
 

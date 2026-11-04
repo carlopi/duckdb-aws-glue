@@ -66,8 +66,10 @@ struct HiveScanInfo : public TableFunctionInfo {
 	void VerifyConsistentPartitionSerDe(const GluePartitionInfo &partition) const;
 	//! The error VerifyConsistentPartitionSerDe throws for the partition, none when it reads like the table
 	ErrorData PartitionStorageMismatch(const GluePartitionInfo &partition) const;
-	//! Throws when a data column the scan reads ('column_indexes' into 'names') is declared by the partition with a
-	//! type its files can not be read as the table's type from: matched by position for csv, by name otherwise
+	//! Glue registers a partition's data columns with their own types. Throws when a column the scan reads
+	//! ('column_indexes' into 'names') is declared by the partition with a type that can not be promoted to the
+	//! table's type, e.g. 'double' in the partition but 'int' in the table. Matched by position for csv, by name
+	//! otherwise
 	void CheckPartitionColumns(ClientContext &context, const GluePartitionInfo &partition,
 	                           const vector<idx_t> &column_indexes) const;
 	//! A description of the table for error messages

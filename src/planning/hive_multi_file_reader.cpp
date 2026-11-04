@@ -55,8 +55,6 @@
 #include "catalog/glue_table.hpp"
 #include "core/glue_types.hpp"
 #include "functions/hive_reader_call.hpp"
-#include "duckdb/function/cast/cast_function_set.hpp"
-#include "catalog/glue_schema_entry.hpp"
 
 namespace duckdb {
 
@@ -207,21 +205,9 @@ void HiveScanInfo::VerifyConsistentPartitionSerDe(const GluePartitionInfo &parti
 	}
 }
 
-//! Whether values of a partition column of type 'from' can be read as the table's type 'to': the changes the
-//! extension's own DDL allows, and DuckDB's implicit casts. Nested types are left to the reader.
-static bool CanReadPartitionTypeAs(ClientContext &context, const LogicalType &from, const LogicalType &to) {
-	if (from.IsNested() || to.IsNested() || GlueSchemaEntry::IsAllowedHiveTypeChange(from, to)) {
-		return true;
-	}
-	if (from.id() == LogicalTypeId::DECIMAL && to.id() == LogicalTypeId::DECIMAL) {
-		return true;
-	}
-	return CastFunctionSet::ImplicitCastCost(context, from, to) >= 0;
-}
-
 void HiveScanInfo::CheckPartitionColumns(ClientContext &context, const GluePartitionInfo &partition,
                                          const vector<idx_t> &column_indexes) const {
-	if (partition.columns.empty() || !this->table) {
+	if (partition.partition_columns.empty() || !this->table) {
 		return;
 	}
 	auto &table_columns = this->table->Cast<GlueTable>().table_info.columns;
@@ -229,11 +215,11 @@ void HiveScanInfo::CheckPartitionColumns(ClientContext &context, const GlueParti
 		auto &name = names[column_index].GetIdentifierName();
 		optional_ptr<const GlueColumn> partition_column;
 		if (file_format == HiveFileFormat::CSV) {
-			if (column_index < partition.columns.size()) {
-				partition_column = &partition.columns[column_index];
+			if (column_index < partition.partition_columns.size()) {
+				partition_column = &partition.partition_columns[column_index];
 			}
 		} else {
-			for (auto &column : partition.columns) {
+			for (auto &column : partition.partition_columns) {
 				if (StringUtil::CIEquals(column.name, name)) {
 					partition_column = &column;
 					break;
@@ -250,7 +236,7 @@ void HiveScanInfo::CheckPartitionColumns(ClientContext &context, const GlueParti
 			// a type the extension can not map is left to the reader
 			continue;
 		}
-		if (CanReadPartitionTypeAs(context, partition_type, types[column_index])) {
+		if (GlueTypes::CanReadPartitionTypeAs(context, partition_type, types[column_index])) {
 			continue;
 		}
 		auto table_type =
