@@ -8,10 +8,12 @@
 #include "duckdb/storage/storage_extension.hpp"
 
 #include "catalog/glue_attach.hpp"
+#include "core/readers/hive_csv_options.hpp"
 #include "functions/glue_functions.hpp"
 #include "grammar/glue_grammar.hpp"
 #include "api/glue_api.hpp"
 #include "api/glue_http_client.hpp"
+#include "core/glue_log_types.hpp"
 #include "duckdb/main/extension_helper.hpp"
 
 #include <aws/core/Aws.h>
@@ -60,6 +62,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "default, uses 8 against AWS and 1 against a Glue compatible server given with "
 	                          "ENDPOINT. At most 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
+	config.AddExtensionOption("glue_max_retries",
+	                          "Set a custom retry limit for AWS SDK Glue API calls: the number of retries after the "
+	                          "first attempt fails, 0 meaning no retries (single attempt), at most 10. -1, the "
+	                          "default, leaves the SDK's own retry policy in place.",
+	                          LogicalType::BIGINT, Value::BIGINT(-1));
 
 	config.AddExtensionOption("glue_create_bucketed_tables",
 	                          "Allow CREATE TABLE ... WITH (BucketColumns = [...], NumberOfBuckets = n, SortColumns = "
@@ -112,6 +120,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "with the NULL padding of short rows. Default true.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
+	config.AddExtensionOption("hive_csv_max_line_size",
+	                          "The longest line, in bytes, a scan of a csv table reads; a longer line fails the query. "
+	                          "Hive reads a line of any length. Up to 8000000 the reader's buffers and how a file is "
+	                          "split between threads are unchanged; a larger limit makes each thread read at least "
+	                          "this many bytes. Default 8000000.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(HIVE_CSV_DEFAULT_MAX_LINE_SIZE));
+
 	config.AddExtensionOption(
 	    "glue_debug_fail_partition_registration",
 	    "For tests: '<Glue error code>:<n>' makes the n-th partition a write registers in Glue, "
@@ -123,6 +138,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// The HTTP client factory has to be in place before the first AWS client is constructed
 	InitAWSAPI();
 	RegisterGlueHttpClientFactory();
+	RegisterGlueLogTypes(instance);
 
 	// Hive tables are read with read_parquet
 	ExtensionHelper::AutoLoadExtension(instance, "parquet");
@@ -143,6 +159,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetGlueSetTableLocationFunction());
 	loader.RegisterFunction(GetGlueReplaceColumnsFunction());
 	loader.RegisterFunction(GetGlueAlterTableFunction());
+	loader.RegisterFunction(*GetGlueRequestsMacro());
 	// ALTER TABLE ... ADD / DROP PARTITION etc., switched on with SET active_grammar_extensions = ['glue_hive_ddl']
 	RegisterGlueGrammarExtension(instance);
 	loader.RegisterFunction(GetHiveScanFunction(instance));

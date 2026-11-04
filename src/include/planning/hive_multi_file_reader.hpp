@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "duckdb/common/mutex.hpp"
@@ -36,6 +37,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	HiveJSONOptions json_options;
 	//! The partition keys, in order
 	vector<string> partition_keys;
+	//! Numbers the scans of a query (HiveQueryCache::NextScanId), so the GlueScan log can tell them apart
+	idx_t scan_id = 0;
 	//! The partition (index into Partitions()) each listed data file belongs to. Filled in while the file list expands,
 	//! which can run concurrently with opening files.
 	mutable mutex file_partitions_lock;
@@ -60,6 +63,11 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! The same, or nothing when the file list has not listed 'path'
 	optional_idx FindPartitionIndexOfFile(const string &path) const;
 	const GluePartitionInfo &GetPartitionOfFile(const string &path) const;
+	//! Throws unless the partition's own storage format reads its files as the scan's reader does: Hive reads every
+	//! partition with its own SerDe, and the scan binds one reader for the table
+	void VerifyConsistentPartitionSerDe(const GluePartitionInfo &partition) const;
+	//! The error VerifyConsistentPartitionSerDe throws for the partition, none when it reads like the table
+	ErrorData PartitionStorageMismatch(const GluePartitionInfo &partition) const;
 	//! A description of the table for error messages
 	string Describe() const;
 	//! The partitions of the table: given at bind (hive_scan), or fetched from Glue on first use and shared with every
