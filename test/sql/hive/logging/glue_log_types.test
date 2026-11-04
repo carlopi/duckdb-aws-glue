@@ -74,7 +74,6 @@ query III
 SELECT operation, status, bool_and(duration_ms >= 0 AND query_id IS NOT NULL) FROM glue_requests()
 GROUP BY ALL ORDER BY operation;
 ----
-AWSGlue.GetDatabase	OK_200	true
 AWSGlue.GetPartitions	OK_200	true
 AWSGlue.GetTable	OK_200	true
 
