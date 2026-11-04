@@ -144,12 +144,6 @@ const GluePartitionInfo &HiveScanInfo::GetPartitionOfFile(const string &path) co
 	return (*partitions)[partition_index];
 }
 
-static bool SameCSVDialect(const HiveCSVOptions &a, const HiveCSVOptions &b) {
-	return a.delimiter == b.delimiter && a.quote == b.quote && a.escape == b.escape && a.skip_lines == b.skip_lines &&
-	       a.null_string == b.null_string && a.serde_fields == b.serde_fields &&
-	       a.null_for_invalid_data == b.null_for_invalid_data && a.false_unless_true == b.false_unless_true;
-}
-
 ErrorData HiveScanInfo::PartitionStorageMismatch(const GluePartitionInfo &partition) const {
 	if (!this->table) {
 		return ErrorData();
@@ -180,8 +174,7 @@ ErrorData HiveScanInfo::PartitionStorageMismatch(const GluePartitionInfo &partit
 			}
 			if (partition_format != file_format) {
 				stored_as = HiveFileFormatToString(partition_format);
-			} else if (partition_format == HiveFileFormat::CSV &&
-			           !SameCSVDialect(partition_storage.GetCSVOptions(), csv_options)) {
+			} else if (partition_format == HiveFileFormat::CSV && partition_storage.GetCSVOptions() != csv_options) {
 				stored_as = "csv with another dialect";
 			} else if (partition_format == HiveFileFormat::JSON &&
 			           partition_storage.GetJSONOptions().ignore_errors != json_options.ignore_errors) {

@@ -17,6 +17,16 @@ HiveFieldConversion HiveCSVOptions::FieldConversion(const LogicalType &type) con
 	return null_for_invalid_data ? HiveFieldConversion::TRY_CAST : HiveFieldConversion::CAST;
 }
 
+bool HiveCSVOptions::operator==(const HiveCSVOptions &other) const {
+	return delimiter == other.delimiter && quote == other.quote && escape == other.escape &&
+	       skip_lines == other.skip_lines && null_string == other.null_string && serde_fields == other.serde_fields &&
+	       null_for_invalid_data == other.null_for_invalid_data && false_unless_true == other.false_unless_true;
+}
+
+bool HiveCSVOptions::operator!=(const HiveCSVOptions &other) const {
+	return !(*this == other);
+}
+
 void HiveCSVOptions::Serialize(Serializer &serializer) const {
 	serializer.WriteProperty(100, "delimiter", delimiter);
 	serializer.WriteProperty(101, "quote", quote);
