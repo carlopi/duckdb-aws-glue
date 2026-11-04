@@ -128,6 +128,17 @@ CALL glue_set_table_location('my_datalake.default.txn_alter', '{DEFAULT_S3_LOCAT
 statement ok
 ROLLBACK;
 
+statement ok
+BEGIN;
+
+statement error
+CALL glue_repair_table('my_datalake.default.txn_alter');
+----
+<REGEX>:TransactionContext Error.*glue_repair_table changes Glue, which has no transactions.*CALL glue_repair_table\(\.\.\.\), outside BEGIN.*
+
+statement ok
+ROLLBACK;
+
 # the partition SQL of the glue_hive_ddl grammar extension (rewritten to glue_alter_table)
 statement ok
 BEGIN;
