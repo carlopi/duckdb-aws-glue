@@ -1,6 +1,9 @@
 #include "planning/stats/hive_footer_statistics.hpp"
 
 #include "duckdb/common/error_data.hpp"
+#include "duckdb/common/multi_file/table_function_multi_file.hpp"
+#include "duckdb/common/operator/add.hpp"
+#include "duckdb/function/partition_stats.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/task_executor.hpp"
@@ -110,6 +113,43 @@ bool HiveParquetFooters::ReadAll() {
 	return true;
 }
 
+optional_idx HiveParquetFooters::RowGroupRows(const OpenFileInfo &file, BaseUnionData &footer) {
+	try {
+		// the row groups are what the parquet reader's partition statistics describe, from the footer already parsed
+		DynamicCastCheck<TableFunctionMultiFileWrapper>(bind_data.interface.get());
+		auto &function = static_cast<const TableFunctionMultiFileWrapper &>(*bind_data.interface).function;
+		auto &file_data = footer.Cast<TableFunctionUnionData>();
+		if (!function.get_partition_stats || !file_data.bind_data) {
+			return optional_idx();
+		}
+		BoundTableFunction bound_function(function);
+		GetPartitionStatsInput input(bound_function, file_data.bind_data.get());
+		auto row_groups = function.get_partition_stats(context, input);
+		if (row_groups.empty()) {
+			// none to count: only a footer that says the file is empty is believed
+			auto total = footer.TryGetCardinalityEstimate();
+			return total.IsValid() && total.GetIndex() == 0 ? optional_idx(idx_t(0)) : optional_idx();
+		}
+		idx_t rows = 0;
+		for (auto &row_group : row_groups) {
+			if (row_group.count_type != CountType::COUNT_EXACT ||
+			    !TryAddOperator::Operation(rows, row_group.count, rows)) {
+				return optional_idx();
+			}
+		}
+		return rows;
+	} catch (std::exception &ex) {
+		ErrorData error(ex);
+		if (error.Type() == ExceptionType::INTERRUPT) {
+			throw;
+		}
+		// costing must not fail a query: the scan reports a file it cannot read
+		DUCKDB_LOG_WARNING(context, "Could not count the row groups of '%s' of Hive table '%s': %s", file.path,
+		                   list.ScanInfo().Describe(), error.RawMessage());
+		return optional_idx();
+	}
+}
+
 optional_idx HiveParquetFooters::Rows() {
 	if (!ReadAll()) {
 		return optional_idx();
@@ -117,11 +157,10 @@ optional_idx HiveParquetFooters::Rows() {
 	idx_t rows = 0;
 	for (auto &file : files) {
 		auto footer = Get(file);
-		auto file_rows = footer ? footer->TryGetCardinalityEstimate() : optional_idx();
-		if (!file_rows.IsValid()) {
+		auto file_rows = footer ? RowGroupRows(file, *footer) : optional_idx();
+		if (!file_rows.IsValid() || !TryAddOperator::Operation(rows, file_rows.GetIndex(), rows)) {
 			return optional_idx();
 		}
-		rows += file_rows.GetIndex();
 	}
 	return rows;
 }

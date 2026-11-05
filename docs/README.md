@@ -114,9 +114,10 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   that one measurement by the files and bytes of the partitions it reads: those the listing holds completely
   count with their own size, the others with the average of those. A scan that lists the same directory reuses
   the listing. Avro tables are not measured, so planning them lists nothing. An unpartitioned parquet table of at
-  most `hive_footer_statistics_max_files` (default 16, at most 25) files is counted instead: the row counts in the
-  footers of all its files add up to an exact count, which the scan also reports as its maximum, as a DuckDB table
-  does (the optimizer drops a `LIMIT` larger than it).
+  most `hive_footer_statistics_max_files` (default 16, at most 25) files is counted instead: the row counts of the
+  row groups in the footers of all its files add up to an exact count, which the scan also reports as its maximum,
+  as a DuckDB table does (the optimizer drops a `LIMIT` larger than it). A footer's own total is not used: a writer
+  can get it wrong, and the scan reads the row groups.
 - A partition key's statistics are exact: the minimum, maximum and number of values of the partitions a scan reads.
   A data column of an unpartitioned parquet table of at most `hive_footer_statistics_max_files` (default 16) files
   gets its minimum, maximum and NULLs merged from the footers of all of them, read at the same time while planning

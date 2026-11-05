@@ -180,6 +180,28 @@ SELECT count(*) FROM (SELECT i FROM fs_uneven() LIMIT 3);
 ----
 3
 
+# the count is of the row groups the scan reads, not the footer's own total: this footer (DuckDB's parquet-testing)
+# says 1 row while its row group holds 5, so a LIMIT of 2 stays, and one of 6 is dropped with all 5 rows read
+query II
+EXPLAIN SELECT i FROM hive_scan('test/data/parquet_footer_row_count_mismatch', schema := {i: 'BIGINT'});
+----
+physical_plan	<REGEX>:.*Hive Scan.*~5 rows.*
+
+query I
+SELECT count(*) FROM (SELECT i FROM hive_scan('test/data/parquet_footer_row_count_mismatch', schema := {i: 'BIGINT'}) LIMIT 2);
+----
+2
+
+query II
+EXPLAIN SELECT i FROM hive_scan('test/data/parquet_footer_row_count_mismatch', schema := {i: 'BIGINT'}) LIMIT 6;
+----
+physical_plan	<!REGEX>:.*Limit.*
+
+query I
+SELECT count(*) FROM (SELECT i FROM hive_scan('test/data/parquet_footer_row_count_mismatch', schema := {i: 'BIGINT'}) LIMIT 6);
+----
+5
+
 # over the bound the count is the sample's estimate, with no max
 statement ok
 SET hive_footer_statistics_max_files = 1;

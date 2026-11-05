@@ -22,7 +22,7 @@ class HiveParquetFooters {
 public:
 	HiveParquetFooters(ClientContext &context, const MultiFileBindData &bind_data, const HiveMultiFileList &list);
 
-	//! Invalid unless every file is within hive_footer_statistics_max_files and has a footer
+	//! The rows of every file's row groups; invalid unless every file is within the bound and its footer counts them
 	optional_idx Rows();
 	//! Null unless every file with rows has the column, as the table's type, in its footer
 	unique_ptr<BaseStatistics> Statistics(const MultiFileColumnDefinition &column);
@@ -33,6 +33,8 @@ private:
 	//! False when the scan is partitioned or has more files than the bound
 	bool ReadAll();
 	shared_ptr<HiveFileFooterEntry> Entry(const OpenFileInfo &file) const;
+	//! What the scan reads of the file: its row groups' rows, which the footer's own total may not match
+	optional_idx RowGroupRows(const OpenFileInfo &file, BaseUnionData &footer);
 
 private:
 	ClientContext &context;
