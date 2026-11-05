@@ -243,6 +243,7 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	// The scan produces the columns this entry was planned with: data columns first, partition keys last. The SerDe
 	// decides the file format (throws for unsupported SerDes).
 	auto scan_info = make_shared_ptr<HiveScanInfo>();
+	scan_info->scan_id = HiveQueryCache::Get(context)->NextScanId();
 	scan_info->catalog_name = catalog.GetName().GetIdentifierName();
 	scan_info->database_name = table_info.schema_name;
 	scan_info->table_name = table_info.name;

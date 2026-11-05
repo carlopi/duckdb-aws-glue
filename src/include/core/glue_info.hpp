@@ -195,11 +195,12 @@ struct GluePartitionInfo {
 	string input_format;
 	string serde_library;
 	unordered_map<string, string> serde_parameters;
+	//! The data columns the partition declares, which can differ from the table's; empty when not known
+	vector<GlueColumn> partition_columns;
 };
 
-//! A partition as GetPartition returns it: also its column schema and parameters
+//! A partition as GetPartition returns it: also its parameters
 struct GluePartitionDetails : public GluePartitionInfo {
-	vector<GlueColumn> columns;
 	unordered_map<string, string> parameters;
 	//! The Partition object this projection was made from
 	shared_ptr<const GlueFetchedPartition> fetched;
