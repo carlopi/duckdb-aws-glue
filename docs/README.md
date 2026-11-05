@@ -54,7 +54,9 @@ Text tables are read the way their SerDe reads them:
   file and the field is read as one value, as CSV defines it. `SET hive_csv_parallel = false` reads one thread per
   file in every scan. Hive and Athena v3 split the record at the line break first (TextInputFormat) and return two
   broken rows, a difference this extension does not reproduce. A boolean field is true when it is `true` in any
-  case and false otherwise.
+  case and false otherwise. A timestamp field is a number of milliseconds since the epoch (`1579059880000` is
+  `2020-01-15 03:44:40`) and a date field a number of days since the epoch (`18276` is `2020-01-15`); text such as
+  `2020-01-15 03:44:40` or `2020-01-15` does not parse.
 - Short rows are padded with NULL, extra fields are ignored, and a value that does not parse as its column type is
   NULL, except in OpenCSVSerde tables, where it fails the query unless `use.null.for.invalid.data` is `true`. Fields
   are converted with `TRY_CAST` (`CAST` in OpenCSVSerde tables without the property), which differs from Hive in
@@ -73,7 +75,9 @@ Text tables are read the way their SerDe reads them:
   with `case.insensitive=false` matches them exactly. Keys of one object that differ only in case are duplicate keys.
 - Writes produce files Hive reads back unchanged: LazySimpleSerDe values are unquoted and refused if they hold the
   delimiter or a line break, or equal the NULL string; OpenCSVSerde values are all quoted and refused if they hold a
-  line break.
+  line break, and timestamps and dates are written as milliseconds (truncated) and days since the epoch (an infinite
+  value is refused). NULL is written as an empty field, which reads back as an empty string in a string column,
+  false in a boolean column and NULL elsewhere only with `use.null.for.invalid.data`; otherwise reading it fails.
 - Not supported, for reads and writes: footer lines (`skip.footer.line.count`), header lines in JsonSerDe tables,
   nested columns, multi-byte quote or escape characters, and for LazySimpleSerDe `escape.delim`, a non-UTF-8
   `serialization.encoding`, `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the
