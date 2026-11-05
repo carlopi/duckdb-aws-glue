@@ -10,9 +10,11 @@
 #include "catalog/glue_attach.hpp"
 #include "core/readers/hive_csv_options.hpp"
 #include "functions/glue_functions.hpp"
+#include "functions/glue_repair_table.hpp"
 #include "grammar/glue_grammar.hpp"
 #include "api/glue_api.hpp"
 #include "api/glue_http_client.hpp"
+#include "core/glue_log_types.hpp"
 #include "duckdb/main/extension_helper.hpp"
 
 #include <aws/core/Aws.h>
@@ -106,9 +108,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    LogicalType::BOOLEAN, Value::BOOLEAN(false));
 
 	config.AddExtensionOption("hive_partition_listing_threshold",
-	                          "When a scan reads at least this many partitions below the table location, the location "
-	                          "is listed once (recursively) instead of one listing per partition. Default 10.",
-	                          LogicalType::UBIGINT, Value::UBIGINT(10));
+	                          "When set, a scan reading at least this many partitions below the table location lists "
+	                          "the location once (recursively) instead of one listing per partition. Unset (default), "
+	                          "the location is listed when that takes fewer rounds of requests than listing the "
+	                          "partitions read, or as many rounds and a tenth of the requests.",
+	                          LogicalType::UBIGINT, Value(LogicalType::UBIGINT));
 
 	config.AddExtensionOption("hive_csv_parallel",
 	                          "Read each file of an OpenCSVSerde table with several threads when a scan has at most "
@@ -135,6 +139,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// The HTTP client factory has to be in place before the first AWS client is constructed
 	InitAWSAPI();
 	RegisterGlueHttpClientFactory();
+	RegisterGlueLogTypes(instance);
 
 	// Hive tables are read with read_parquet
 	ExtensionHelper::AutoLoadExtension(instance, "parquet");
@@ -155,6 +160,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetGlueSetTableLocationFunction());
 	loader.RegisterFunction(GetGlueReplaceColumnsFunction());
 	loader.RegisterFunction(GetGlueAlterTableFunction());
+	loader.RegisterFunction(GetGlueRepairTableFunction());
+	loader.RegisterFunction(*GetGlueRequestsMacro());
 	// ALTER TABLE ... ADD / DROP PARTITION etc., switched on with SET active_grammar_extensions = ['glue_hive_ddl']
 	RegisterGlueGrammarExtension(instance);
 	loader.RegisterFunction(GetHiveScanFunction(instance));

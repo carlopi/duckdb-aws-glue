@@ -21,18 +21,6 @@ namespace duckdb {
 
 namespace {
 
-//===--------------------------------------------------------------------===//
-// Shared: resolving the table and the partition spec
-//===--------------------------------------------------------------------===//
-struct GluePartitionTarget {
-	GlueCatalog *catalog = nullptr;
-	GlueTableInfo table;
-
-	string TableName() const {
-		return table.schema_name + "." + table.name;
-	}
-};
-
 void ThrowIsView(const string &function_name, const string &table_name, bool require_partitions) {
 	if (require_partitions) {
 		throw BinderException("%s: Glue view '%s' has no partitions", function_name, table_name);
@@ -40,8 +28,10 @@ void ThrowIsView(const string &function_name, const string &table_name, bool req
 	throw BinderException("%s: '%s' is a Glue view, not a table", function_name, table_name);
 }
 
+} // namespace
+
 GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &function_name, const Value &table_name,
-                                     bool require_partitions = true) {
+                                     bool require_partitions) {
 	auto name = ResolveGlueTableName(context, function_name, table_name.GetValue<string>());
 	GluePartitionTarget result;
 	result.catalog = &Catalog::GetCatalog(context, name.Catalog()).Cast<GlueCatalog>();
@@ -63,6 +53,17 @@ GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &funct
 	}
 	return result;
 }
+
+Value PartitionListingValue(ClientContext &context, const string &key, const string &str_value,
+                            const LogicalType &type) {
+	try {
+		return GlueTypes::PartitionValue(context, key, str_value, type);
+	} catch (std::exception &) {
+		return Value(type);
+	}
+}
+
+namespace {
 
 //! Turn a partition spec {key: value, ...} into the partition values (as strings) in partition key order. The spec
 //! must name every partition key and nothing else.
@@ -178,18 +179,6 @@ string DefaultPartitionLocation(const GluePartitionTarget &target, const vector<
 		}
 	}
 	return location;
-}
-
-//! GlueTypes::PartitionValue, but a partition value that can't be cast to the key's type is NULL instead of throwing,
-//! so one bad partition doesn't make the whole glue_partitions() listing fail (e.g. 'abc' for an INT key lists as
-//! NULL).
-static Value PartitionListingValue(ClientContext &context, const string &key, const string &str_value,
-                                   const LogicalType &type) {
-	try {
-		return GlueTypes::PartitionValue(context, key, str_value, type);
-	} catch (std::exception &) {
-		return Value(type);
-	}
 }
 
 //! Bind data for the functions that change one partition and report one row when executed
@@ -833,23 +822,46 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 	auto table_name = bind_data.target.TableName();
 
 	// Glue has no transactions: check everything that can fail against the catalog first, so that a statement
-	// which fails half way registers or removes nothing. The partitions a rename or a new location rewrites are
-	// kept from this check.
+	// which fails half way registers or removes nothing. Which partitions exist is fetched together, each partition
+	// once; the partitions a rename or a new location rewrites are fetched whole and kept from this check.
+	set<vector<string>> lookups;
+	for (auto &step : bind_data.steps) {
+		switch (step.action) {
+		case GlueAlterAction::ADD:
+			if (!step.if_not_exists) {
+				lookups.insert(step.values);
+			}
+			break;
+		case GlueAlterAction::DROP:
+			if (!step.if_exists) {
+				lookups.insert(step.values);
+			}
+			break;
+		case GlueAlterAction::RENAME:
+			lookups.insert(step.new_values);
+			break;
+		case GlueAlterAction::SET_PARTITION_LOCATION:
+		case GlueAlterAction::SET_TABLE_LOCATION:
+			break;
+		}
+	}
+	auto existing = GlueAPI::ExistingPartitions(context, catalog, table.schema_name, table.name,
+	                                            vector<vector<string>>(lookups.begin(), lookups.end()));
+	auto exists = [&](const vector<string> &values) {
+		return existing.find(values) != existing.end();
+	};
 	vector<unique_ptr<GluePartitionDetails>> checked(bind_data.steps.size());
 	for (idx_t i = 0; i < bind_data.steps.size(); i++) {
 		auto &step = bind_data.steps[i];
-		GluePartitionInfo existing;
 		switch (step.action) {
 		case GlueAlterAction::ADD:
-			if (!step.if_not_exists &&
-			    GlueAPI::GetPartition(context, catalog, table.schema_name, table.name, step.values, existing)) {
+			if (!step.if_not_exists && exists(step.values)) {
 				throw CatalogException("Partition [%s] already exists in Glue table '%s'",
 				                       StringUtil::Join(step.values, ", "), table_name);
 			}
 			break;
 		case GlueAlterAction::DROP:
-			if (!step.if_exists &&
-			    !GlueAPI::GetPartition(context, catalog, table.schema_name, table.name, step.values, existing)) {
+			if (!step.if_exists && !exists(step.values)) {
 				throw CatalogException("Partition [%s] does not exist in Glue table '%s'",
 				                       StringUtil::Join(step.values, ", "), table_name);
 			}
@@ -861,14 +873,17 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 			break;
 		case GlueAlterAction::RENAME:
 			checked[i] = make_uniq<GluePartitionDetails>(FetchPartition(context, bind_data.target, step.values));
-			ThrowIfPartitionExists(context, bind_data.target, step.new_values);
+			if (exists(step.new_values)) {
+				throw CatalogException("Partition [%s] already exists in Glue table '%s'",
+				                       StringUtil::Join(step.new_values, ", "), table_name);
+			}
 			break;
 		case GlueAlterAction::SET_TABLE_LOCATION:
 			break;
 		}
 	}
 
-	// consecutive adds go out as one BatchCreatePartition call
+	// consecutive adds go out as one BatchCreatePartition call, consecutive drops as one BatchDeletePartition call
 	auto emit = [&](const GlueAlterStep &step) {
 		GlueAlterTableState::EmittedRow row;
 		row.action = Value(DescribeAction(step.action));
@@ -876,6 +891,8 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 		row.location = step.location.empty() ? Value(LogicalType::VARCHAR) : Value(step.location);
 		state.rows.push_back(std::move(row));
 	};
+	bool table_updated = false;
+	GlueTableInfo refetched_table;
 	vector<GluePartitionInput> pending_adds;
 	auto flush_adds = [&]() {
 		if (pending_adds.empty()) {
@@ -884,10 +901,23 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 		GlueAPI::BatchCreatePartitions(context, catalog, table, pending_adds);
 		pending_adds.clear();
 	};
+	vector<vector<string>> pending_drops;
+	set<vector<string>> pending_drop_set;
+	auto flush_drops = [&]() {
+		if (pending_drops.empty()) {
+			return;
+		}
+		GlueAPI::BatchDeletePartitions(context, catalog, table.schema_name, table.name, pending_drops);
+		pending_drops.clear();
+		pending_drop_set.clear();
+	};
 	for (idx_t i = 0; i < bind_data.steps.size(); i++) {
 		auto &step = bind_data.steps[i];
 		if (step.action != GlueAlterAction::ADD) {
 			flush_adds();
+		}
+		if (step.action != GlueAlterAction::DROP) {
+			flush_drops();
 		}
 		switch (step.action) {
 		case GlueAlterAction::ADD: {
@@ -898,7 +928,10 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 			break;
 		}
 		case GlueAlterAction::DROP:
-			GlueAPI::DeletePartition(context, catalog, table.schema_name, table.name, step.values);
+			// a partition named twice is deleted once
+			if (pending_drop_set.insert(step.values).second) {
+				pending_drops.push_back(step.values);
+			}
 			break;
 		case GlueAlterAction::RENAME:
 			GlueAPI::RenamePartition(context, catalog, table.schema_name, table.name, *checked[i], step.new_values);
@@ -912,12 +945,18 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 			break;
 		}
 		case GlueAlterAction::SET_TABLE_LOCATION:
-			GlueAPI::SetTableLocation(context, catalog, table, step.location);
+			// UpdateTable is refused with the VersionId of the definition an earlier step already replaced
+			if (table_updated && !GlueAPI::GetTable(context, catalog, table.schema_name, table.name, refetched_table)) {
+				throw CatalogException("Glue table '%s' was dropped while it was altered", table_name);
+			}
+			GlueAPI::SetTableLocation(context, catalog, table_updated ? refetched_table : table, step.location);
+			table_updated = true;
 			break;
 		}
 		emit(step);
 	}
 	flush_adds();
+	flush_drops();
 }
 
 void GlueAlterTableScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
@@ -991,7 +1030,7 @@ void GlueGetPartitionResponseScan(ClientContext &context, TableFunctionInput &da
 	output.data[2].Append(Value::LIST(LogicalType::VARCHAR, std::move(values)));
 	output.data[3].Append(Value(partition.location));
 	output.data[4].Append(Value(partition.serde_library));
-	output.data[5].Append(GlueColumnsToValue(partition.columns));
+	output.data[5].Append(GlueColumnsToValue(partition.partition_columns));
 	output.data[6].Append(GlueParametersToValue(partition.parameters));
 	output.data[7].Append(GlueParametersToValue(partition.serde_parameters));
 

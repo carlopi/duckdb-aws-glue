@@ -341,6 +341,7 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 	    GetSerDe() != HiveSerDe::OPEN_CSV || (TryGetProperty("use.null.for.invalid.data", null_for_invalid_data) &&
 	                                          StringUtil::CIEquals(null_for_invalid_data, "true"));
 	options.false_unless_true = GetSerDe() == HiveSerDe::OPEN_CSV;
+	options.epoch_fields = GetSerDe() == HiveSerDe::OPEN_CSV;
 	return options;
 }
 
@@ -374,8 +375,8 @@ string GlueTableInfo::GetMetadataLocation() const {
 }
 
 optional_idx GluePartitionInfo::FindColumnTypeMismatch(const vector<GlueColumn> &table_columns) const {
-	for (idx_t i = 0; i < MinValue(table_columns.size(), columns.size()); i++) {
-		if (!GlueTypeHelpers::SameColumnType(table_columns[i].type, columns[i].type)) {
+	for (idx_t i = 0; i < MinValue(table_columns.size(), partition_columns.size()); i++) {
+		if (!GlueTypeHelpers::SameColumnType(table_columns[i].type, partition_columns[i].type)) {
 			return i;
 		}
 	}
