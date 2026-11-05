@@ -102,6 +102,12 @@ unique_ptr<GlobalSinkState> GlueHiveCopy::GetGlobalSinkState(ClientContext &cont
 				                       "TABLE IF NOT EXISTS",
 				                       table_info.name);
 			}
+			// Record the table for cleanup only after we actually created it. CreateTableFromInfo returns
+			// non-null only when this statement created the table; it returns null when the table already
+			// existed (CREATE TABLE IF NOT EXISTS, or another client winning a create race), and we throw above
+			// before recording it. So a rollback only ever drops a table this statement itself created.
+			GlueAPI::RegisterTableCleanup(context, catalog.Cast<GlueCatalog>(), table_info.schema_name,
+			                              table_info.name);
 			table_created = true;
 		}
 	}
