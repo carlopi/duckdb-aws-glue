@@ -125,6 +125,17 @@ static unique_ptr<Expression> EpochField(ClientContext &context, unique_ptr<Expr
 	return make_uniq<BoundCaseExpression>(std::move(infinite), std::move(raise), std::move(number));
 }
 
+//! A value's text with 'escape' doubled, which a reader that drops an unpaired escape character (OpenCSVSerde) reads
+//! back as one
+static unique_ptr<Expression> EscapedTextField(ClientContext &context, unique_ptr<Expression> text,
+                                               const string &escape) {
+	vector<unique_ptr<Expression>> children;
+	children.push_back(std::move(text));
+	children.push_back(make_uniq<BoundConstantExpression>(Value(escape)));
+	children.push_back(make_uniq<BoundConstantExpression>(Value(escape + escape)));
+	return BindFunction(context, "replace", std::move(children));
+}
+
 static optional_ptr<CopyFunctionCatalogEntry> TryGetCopyFunction(DatabaseInstance &db, const string &name) {
 	auto &system_catalog = Catalog::GetSystemCatalog(db);
 	auto data = CatalogTransaction::GetSystemTransaction(db);
@@ -405,6 +416,9 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 				// only unquoted fields can not tell the NULL string from NULL
 				column =
 				    CheckedTextField(context, std::move(column), forbidden, quoted ? nullptr : &null_string, message);
+				if (!csv_options.field_escape.empty()) {
+					column = EscapedTextField(context, std::move(column), csv_options.field_escape);
+				}
 				copy_types[i] = LogicalType::VARCHAR;
 			}
 			projected_types.push_back(column->GetReturnType());

@@ -340,6 +340,13 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 	                                          StringUtil::CIEquals(null_for_invalid_data, "true"));
 	options.false_unless_true = GetSerDe() == HiveSerDe::OPEN_CSV;
 	options.epoch_fields = GetSerDe() == HiveSerDe::OPEN_CSV;
+	// without escapeChar OpenCSVSerde reads with a '\' escape, which read_csv, given the quote character, would keep;
+	// an explicit escapeChar '"', which this extension writes, is read as it is
+	string escape_char;
+	auto escape_set = TryGetProperty("escapeChar", escape_char) && !escape_char.empty();
+	if (GetSerDe() == HiveSerDe::OPEN_CSV && !escape_set && options.delimiter != "\\" && options.quote != "\\") {
+		options.field_escape = "\\";
+	}
 	return options;
 }
 
