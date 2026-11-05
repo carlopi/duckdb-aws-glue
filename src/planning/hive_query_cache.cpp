@@ -59,14 +59,14 @@ private:
 } // namespace
 
 void ClearHiveListingCache(ClientContext &context) {
-	auto cache = context.Services().GetRegisteredState().Get<HiveListingCache>(HIVE_LISTING_CACHE);
+	auto cache = context.registered_state->Get<HiveListingCache>(HIVE_LISTING_CACHE);
 	if (cache) {
 		cache->Clear();
 	}
 }
 
 shared_ptr<HiveQueryCache> HiveQueryCache::Get(ClientContext &context) {
-	return context.Services().GetRegisteredState().GetOrCreate<HiveQueryCache>(HIVE_QUERY_CACHE);
+	return context.registered_state->GetOrCreate<HiveQueryCache>(HIVE_QUERY_CACHE);
 }
 
 string HiveQueryCache::TableKey(const string &catalog, const string &database, const string &table) {
@@ -110,10 +110,7 @@ shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &con
 	StringUtil::RTrim(key, "/");
 	if (cache_in_connection) {
 		// the connection's listings (glue_cache_listings): kept for later statements, cleared with the metadata cache
-		return context.Services()
-		    .GetRegisteredState()
-		    .GetOrCreate<HiveListingCache>(HIVE_LISTING_CACHE)
-		    ->GetListing(context, key);
+		return context.registered_state->GetOrCreate<HiveListingCache>(HIVE_LISTING_CACHE)->GetListing(context, key);
 	}
 	shared_ptr<HiveDirectoryListingEntry> entry;
 	{
