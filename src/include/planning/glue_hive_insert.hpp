@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/map.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/planner/operator/logical_create_table.hpp"
@@ -68,6 +69,8 @@ public:
 	GlueCatalog &catalog;
 	//! The one resolved table definition used by both CTAS catalog creation and file-writer planning.
 	GlueTableInfo table_info;
+	//! Where each partition that existed when the INSERT was planned is registered, by its Glue values.
+	map<vector<string>, string> planned_locations;
 	//! The directories of existing partitions not laid out as <key=value>, with their Glue values.
 	unordered_map<string, vector<string>> partition_directories;
 };

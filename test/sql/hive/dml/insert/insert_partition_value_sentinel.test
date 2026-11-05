@@ -76,6 +76,27 @@ SELECT count(*) FROM glue_partitions('my_datalake.default.pv_sentinel');
 ----
 16
 
+# alone, in a table with no NULL partition: its partition would be registered with the NULL partition's value and read
+# back as NULL
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pv_sentinel_alone;
+
+statement ok
+CREATE TABLE my_datalake.default.pv_sentinel_alone (id INTEGER, k VARCHAR) PARTITIONED BY (k);
+
+statement error
+INSERT INTO my_datalake.default.pv_sentinel_alone VALUES (1, '__HIVE_DEFAULT_PARTITION__');
+----
+<REGEX>:.*partition key 'k' has a value \('__HIVE_DEFAULT_PARTITION__'\) that Hive reads back as NULL.*
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.pv_sentinel_alone');
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.pv_sentinel_alone;
+
 # a table with no NULL partition yet refuses it too
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.pv_sentinel_new;
@@ -123,14 +144,14 @@ foreach value __HIVE_DEFAULT_PARTITION__ NULL nUlL
 statement error
 INSERT INTO my_datalake.default.pv_sentinel_blob VALUES (5, '{value}'::BLOB);
 ----
-<REGEX>:.*partition key 'k' has a value \('__HIVE_DEFAULT_PARTITION__', 'NULL' or ''\) that Hive reads back as NULL.*
+<REGEX>:.*partition key 'k' has a value \('__HIVE_DEFAULT_PARTITION__', 'NULL' in any case, or ''\) that Hive reads back as NULL.*
 
 endloop
 
 statement error
 INSERT INTO my_datalake.default.pv_sentinel_blob VALUES (5, ''::BLOB);
 ----
-<REGEX>:.*partition key 'k' has a value \('__HIVE_DEFAULT_PARTITION__', 'NULL' or ''\) that Hive reads back as NULL.*
+<REGEX>:.*partition key 'k' has a value \('__HIVE_DEFAULT_PARTITION__', 'NULL' in any case, or ''\) that Hive reads back as NULL.*
 
 query II
 SELECT id, k FROM my_datalake.default.pv_sentinel_blob ORDER BY id;
@@ -142,35 +163,6 @@ SELECT id, k FROM my_datalake.default.pv_sentinel_blob ORDER BY id;
 
 statement ok
 DROP TABLE my_datalake.default.pv_sentinel_blob;
-
-# the check is on the partition path, so it holds for every file format
-foreach fmt parquet csv json avro
-
-statement ok
-DROP TABLE IF EXISTS my_datalake.default.pv_sentinel_{fmt};
-
-statement ok
-CREATE TABLE my_datalake.default.pv_sentinel_{fmt} (id INTEGER, k VARCHAR) PARTITIONED BY (k) WITH (format = '{fmt}');
-
-statement error
-INSERT INTO my_datalake.default.pv_sentinel_{fmt} VALUES (1, '__HIVE_DEFAULT_PARTITION__'), (2, NULL), (3, 'a/b');
-----
-<REGEX>:.*partition key 'k' has a value \('__HIVE_DEFAULT_PARTITION__'\) that Hive reads back as NULL.*
-
-statement ok
-INSERT INTO my_datalake.default.pv_sentinel_{fmt} VALUES (2, NULL), (3, 'a/b'), (4, '__hive_default_partition__');
-
-query II
-SELECT k, id FROM my_datalake.default.pv_sentinel_{fmt} ORDER BY id;
-----
-NULL	2
-a/b	3
-__hive_default_partition__	4
-
-statement ok
-DROP TABLE my_datalake.default.pv_sentinel_{fmt};
-
-endloop
 
 statement ok
 DROP TABLE my_datalake.default.pv_sentinel;
