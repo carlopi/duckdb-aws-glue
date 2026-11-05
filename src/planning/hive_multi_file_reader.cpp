@@ -1594,48 +1594,10 @@ static void MakeFalseUnlessTrue(ClientContext &context, unique_ptr<Expression> &
 	vector<unique_ptr<Expression>> children;
 	children.push_back(std::move(BoundCastExpression::ChildMutable(cast)));
 	FunctionBinder function_binder(context);
-	ErrorData error;
-	auto lower = function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("lower"),
-	                                                std::move(children), error);
-	if (!lower) {
-		error.Throw();
-	}
+	auto lower =
+	    function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("lower"), std::move(children));
 	expr = BoundComparisonExpression::Create(ExpressionType::COMPARE_EQUAL, std::move(lower),
 	                                         make_uniq<BoundConstantExpression>(Value("true")));
-}
-
-static unique_ptr<Expression> BindTextFunction(ClientContext &context, const char *name,
-                                               vector<unique_ptr<Expression>> children) {
-	FunctionBinder function_binder(context);
-	ErrorData error;
-	auto function =
-	    function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier(name), std::move(children), error);
-	if (!function) {
-		error.Throw();
-	}
-	return function;
-}
-
-//! Drop the escape character read_csv does not apply from a field's text, before the text is converted; only a field
-//! that holds it goes through regexp_replace
-static void UnescapeField(ClientContext &context, unique_ptr<Expression> &expr, const HiveCSVOptions &options) {
-	auto &text = BoundCastExpression::IsCast(*expr)
-	                 ? BoundCastExpression::ChildMutable(expr->Cast<BoundFunctionExpression>())
-	                 : expr;
-	if (text->GetReturnType() != LogicalType::VARCHAR || text->IsFoldable()) {
-		return;
-	}
-	vector<unique_ptr<Expression>> contains;
-	contains.push_back(text->Copy());
-	contains.push_back(make_uniq<BoundConstantExpression>(Value(options.field_escape)));
-	vector<unique_ptr<Expression>> replace;
-	replace.push_back(text->Copy());
-	replace.push_back(make_uniq<BoundConstantExpression>(Value(options.FieldEscapePattern())));
-	replace.push_back(make_uniq<BoundConstantExpression>(Value("\\1")));
-	replace.push_back(make_uniq<BoundConstantExpression>(Value("g")));
-	text = make_uniq<BoundCaseExpression>(BindTextFunction(context, "contains", std::move(contains)),
-	                                      BindTextFunction(context, "regexp_replace", std::move(replace)),
-	                                      std::move(text));
 }
 
 //! Make the cast of a field's text to TIMESTAMP make_timestamp_ms(CAST(text AS BIGINT)), and to DATE
@@ -1673,6 +1635,31 @@ static void MakeEpoch(ClientContext &context, unique_ptr<Expression> &expr, bool
 		value = std::move(try_value);
 	}
 	expr = std::move(value);
+}
+
+//! Drop the escape character read_csv does not apply from a field's text, before the text is converted; only a field
+//! that holds it goes through regexp_replace
+static void UnescapeField(ClientContext &context, unique_ptr<Expression> &expr, const HiveCSVOptions &options) {
+	auto &text = BoundCastExpression::IsCast(*expr)
+	                 ? BoundCastExpression::ChildMutable(expr->Cast<BoundFunctionExpression>())
+	                 : expr;
+	if (text->GetReturnType() != LogicalType::VARCHAR || text->IsFoldable()) {
+		return;
+	}
+	vector<unique_ptr<Expression>> contains;
+	contains.push_back(text->Copy());
+	contains.push_back(make_uniq<BoundConstantExpression>(Value(options.field_escape)));
+	vector<unique_ptr<Expression>> replace;
+	replace.push_back(text->Copy());
+	replace.push_back(make_uniq<BoundConstantExpression>(Value(options.FieldEscapePattern())));
+	replace.push_back(make_uniq<BoundConstantExpression>(Value("\\1")));
+	replace.push_back(make_uniq<BoundConstantExpression>(Value("g")));
+	FunctionBinder function_binder(context);
+	text = make_uniq<BoundCaseExpression>(
+	    function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("contains"), std::move(contains)),
+	    function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("regexp_replace"),
+	                                       std::move(replace)),
+	    std::move(text));
 }
 
 ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &reader_data,

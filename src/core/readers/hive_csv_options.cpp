@@ -2,7 +2,7 @@
 
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
-#include "duckdb/common/string_util.hpp"
+#include "re2/re2.h"
 #include "duckdb/common/types.hpp"
 
 namespace duckdb {
@@ -21,19 +21,9 @@ HiveFieldConversion HiveCSVOptions::FieldConversion(const LogicalType &type) con
 	return null_for_invalid_data ? HiveFieldConversion::TRY_CAST : HiveFieldConversion::CAST;
 }
 
-static string RegexLiteral(const string &text) {
-	string result;
-	for (auto c : text) {
-		if (!StringUtil::CharacterIsAlphaNumeric(c)) {
-			result += '\\';
-		}
-		result += c;
-	}
-	return result;
-}
-
 string HiveCSVOptions::FieldEscapePattern() const {
-	return RegexLiteral(field_escape) + "([" + RegexLiteral(field_escape) + RegexLiteral(quote) + "])?";
+	return duckdb_re2::RE2::QuoteMeta(field_escape) + "([" + duckdb_re2::RE2::QuoteMeta(field_escape) +
+	       duckdb_re2::RE2::QuoteMeta(quote) + "])?";
 }
 
 bool HiveCSVOptions::operator==(const HiveCSVOptions &other) const {

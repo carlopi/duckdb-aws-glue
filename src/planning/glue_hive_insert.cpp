@@ -100,24 +100,6 @@ static unique_ptr<Expression> CheckedTextField(ClientContext &context, unique_pt
 	return make_uniq<BoundCaseExpression>(std::move(refused), std::move(raise), std::move(text));
 }
 
-//! A value's text with 'escape' doubled, which a reader that drops an unpaired escape character (OpenCSVSerde) reads
-//! back as one
-static unique_ptr<Expression> EscapedTextField(ClientContext &context, unique_ptr<Expression> text,
-                                               const string &escape) {
-	vector<unique_ptr<Expression>> children;
-	children.push_back(std::move(text));
-	children.push_back(make_uniq<BoundConstantExpression>(Value(escape)));
-	children.push_back(make_uniq<BoundConstantExpression>(Value(escape + escape)));
-	FunctionBinder function_binder(context);
-	ErrorData error;
-	auto escaped = function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("replace"),
-	                                                  std::move(children), error);
-	if (!escaped) {
-		error.Throw();
-	}
-	return escaped;
-}
-
 //! A timestamp or a date as OpenCSVSerde reads it, the milliseconds (truncated) or days since the epoch; an error when
 //! infinite
 static unique_ptr<Expression> EpochField(ClientContext &context, unique_ptr<Expression> value,
@@ -141,6 +123,17 @@ static unique_ptr<Expression> EpochField(ClientContext &context, unique_ptr<Expr
 	}
 	auto raise = RaiseError(context, error_message, number->GetReturnType());
 	return make_uniq<BoundCaseExpression>(std::move(infinite), std::move(raise), std::move(number));
+}
+
+//! A value's text with 'escape' doubled, which a reader that drops an unpaired escape character (OpenCSVSerde) reads
+//! back as one
+static unique_ptr<Expression> EscapedTextField(ClientContext &context, unique_ptr<Expression> text,
+                                               const string &escape) {
+	vector<unique_ptr<Expression>> children;
+	children.push_back(std::move(text));
+	children.push_back(make_uniq<BoundConstantExpression>(Value(escape)));
+	children.push_back(make_uniq<BoundConstantExpression>(Value(escape + escape)));
+	return BindFunction(context, "replace", std::move(children));
 }
 
 static optional_ptr<CopyFunctionCatalogEntry> TryGetCopyFunction(DatabaseInstance &db, const string &name) {

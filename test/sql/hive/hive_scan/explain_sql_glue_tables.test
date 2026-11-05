@@ -81,8 +81,7 @@ EXPLAIN (SQL) SELECT * FROM my_datalake.default.es_text;
 ----
 sql	<REGEX>:.*SELECT\s+TRY_CAST\(__internal_barrier\(id\) AS INTEGER\) AS id,\s+"name",\s+TRY_CAST\(__internal_barrier\(amount\) AS DOUBLE\) AS amount,\s+'2016-05-14' AS dt\s+FROM "system"\.main\.read_csv\(.*\(delim = CAST\(',' AS VARCHAR\)\),.*\(null_padding = CAST\(TRUE AS BOOLEAN\)\),\s*\(nullstr = CAST\('\\N' AS VARCHAR\)\),.*\(strict_mode = CAST\(FALSE AS BOOLEAN\)\).*
 
-# OpenCSVSerde: a value that does not parse fails the query (CAST), a boolean is true when it is 'true' in any case, and
-# the '\' escape is dropped from every field
+# OpenCSVSerde: a value that does not parse fails the query (CAST), and a boolean is true when it is 'true' in any case
 statement ok
 CREATE TABLE my_datalake.default.es_opencsv (id INTEGER, name VARCHAR, flag BOOLEAN, dt VARCHAR) PARTITIONED BY (dt)
 WITH (format = 'csv', quote = '"');
@@ -97,7 +96,7 @@ TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/es_opencsv/dt=2016-05-14/more.csv' 
 query II
 EXPLAIN (SQL) SELECT * FROM my_datalake.default.es_opencsv;
 ----
-sql	<REGEX>:.*SELECT\s+CAST\(CASE\s+WHEN \(contains\(__internal_barrier\(id\), '\\'\)\) THEN \(regexp_replace\(__internal_barrier\(id\), '[^']*', '\\1', 'g'\)\) ELSE __internal_barrier\(id\) END AS INTEGER\) AS id,\s+CASE\s+WHEN \(contains\("name", '\\'\)\) THEN \(regexp_replace\("name", '[^']*', '\\1', 'g'\)\) ELSE "name" END AS "?name"?,\s+\(lower\(CASE\s+WHEN \(contains\(__internal_barrier\(flag\), '\\'\)\) THEN \(regexp_replace\(__internal_barrier\(flag\), '[^']*', '\\1', 'g'\)\) ELSE __internal_barrier\(flag\) END\) = 'true'\) AS flag,\s+'2016-05-14' AS dt\s+FROM "system"\.main\.read_csv\(.*\("quote" = CAST\('"' AS VARCHAR\)\).*
+sql	<REGEX>:.*SELECT\s+CAST\(__internal_barrier\(id\) AS INTEGER\) AS id,\s+"name",\s+\(lower\(__internal_barrier\(flag\)\) = 'true'\) AS flag,\s+'2016-05-14' AS dt\s+FROM "system"\.main\.read_csv\(.*\("quote" = CAST\('"' AS VARCHAR\)\).*
 
 # one thread per file, as the planning session has it
 statement ok

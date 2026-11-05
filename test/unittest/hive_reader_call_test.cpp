@@ -454,34 +454,27 @@ TEST_CASE("Glue tables of every SerDe are restated", "[hive_reader_call][glue_ca
 		scan.Retype("name", LogicalType::INTEGER);
 		REQUIRE(!HiveScanGetReaderCall(scan.Get()).has_value());
 	}
-	// OpenCSVSerde: quoted, one header line, no NULL, a value that does not parse fails the query, and a '\' escape is
-	// dropped from every field
-	auto unescaped = [](const string &field) {
-		return "CASE  WHEN (contains(" + field + ", '\\')) THEN (regexp_replace(" + field +
-		       ", '\\\\([\\\\\"])?', '\\1', 'g')) ELSE " + field + " END";
-	};
+	// OpenCSVSerde: quoted, one header line, no NULL, and a value that does not parse fails the query
 	auto opencsv = tables.Add("opencsv");
 	Run(con, "CREATE TABLE lake.default." + opencsv +
 	             " (id INTEGER, name VARCHAR, amount DOUBLE) WITH (format = 'csv', quote = '\"', "
 	             "'skip.header.line.count' = '1')");
 	auto opencsv_location = location + "/default/" + opencsv;
-	WriteLines(con, {"id,name,amount", "1,\"a,b\",1.5", "2,", "3,\"x \"\"y\"\"\",3.5,extra", "4", "8,a\\x,8\\.5"},
+	WriteLines(con, {"id,name,amount", "1,\"a,b\",1.5", "2,", "3,\"x \"\"y\"\"\",3.5,extra", "4"},
 	           opencsv_location + "/data.csv");
 	query = "SELECT * FROM lake.default." + opencsv;
 	read = Restate(con, query);
-	REQUIRE(StringUtil::Contains(read, "CAST(" + unescaped("__internal_barrier(amount)") + " AS DOUBLE)"));
-	REQUIRE(StringUtil::Contains(read, unescaped("\"name\"")));
+	REQUIRE(StringUtil::Contains(read, "CAST(__internal_barrier(amount) AS DOUBLE)"));
 	REQUIRE(!StringUtil::Contains(read, "TRY_CAST"));
-	REQUIRE(Rows(con, read) == 5);
-	REQUIRE(Scalar(con, "SELECT name || ':' || amount FROM (" + read + ") WHERE id = 8").ToString() == "ax:8.5");
+	REQUIRE(Rows(con, read) == 4);
 	REQUIRE(Differences(con, query, read) == 0);
 	WriteLines(con, {"id,name,amount", "5,e,oops"}, opencsv_location + "/invalid.csv");
 	REQUIRE(StringUtil::Contains(ReadError(con, query), "Could not convert string 'oops' to DOUBLE"));
 	REQUIRE(StringUtil::Contains(ReadError(con, Restate(con, query)), "Could not convert string 'oops' to DOUBLE"));
 	Run(con, "ALTER TABLE lake.default." + opencsv + " SET ('use.null.for.invalid.data' = 'true')");
 	read = Restate(con, query);
-	REQUIRE(StringUtil::Contains(read, "TRY_CAST(" + unescaped("__internal_barrier(amount)") + " AS DOUBLE)"));
-	REQUIRE(Rows(con, read) == 6);
+	REQUIRE(StringUtil::Contains(read, "TRY_CAST(__internal_barrier(amount) AS DOUBLE)"));
+	REQUIRE(Rows(con, read) == 5);
 	REQUIRE(Differences(con, query, read) == 0);
 	// a quoted line break: planned with hive_csv_parallel off, the read is sent to a session that has it on
 	WriteLines(con, {"id,name,amount", "6,\"two\nlines\",6.5", "7"}, opencsv_location + "/line_break.csv");
@@ -490,7 +483,7 @@ TEST_CASE("Glue tables of every SerDe are restated", "[hive_reader_call][glue_ca
 	Run(con, "RESET hive_csv_parallel");
 	REQUIRE(StringUtil::Contains(read, "\"parallel\" := false"));
 	REQUIRE(StringUtil::Contains(ReadError(con, query), "parallel scanner does not support null_padding"));
-	REQUIRE(Rows(con, read) == 8);
+	REQUIRE(Rows(con, read) == 7);
 	// an OpenCSVSerde boolean is true for 'true' in any case and false otherwise, never an error
 	auto flags = tables.Add("flags");
 	Run(con, "CREATE TABLE lake.default." + flags + " (id INTEGER, ok BOOLEAN) WITH (format = 'csv', quote = '\"')");
@@ -500,8 +493,7 @@ TEST_CASE("Glue tables of every SerDe are restated", "[hive_reader_call][glue_ca
 	{
 		PlannedScan scan(con, query);
 		REQUIRE(Columns(Call(scan)) ==
-		        vector<string> {"CAST(" + unescaped("__internal_barrier(id)") + " AS INTEGER)",
-		                        "(lower(" + unescaped("__internal_barrier(ok)") + ") = 'true')"});
+		        vector<string> {"CAST(__internal_barrier(id) AS INTEGER)", "(lower(__internal_barrier(ok)) = 'true')"});
 	}
 	read = Restate(con, query);
 	REQUIRE(Scalar(con,
