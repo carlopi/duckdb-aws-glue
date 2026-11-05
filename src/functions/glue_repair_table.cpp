@@ -1,6 +1,7 @@
 #include "functions/glue_repair_table.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/map.hpp"
 #include "duckdb/common/set.hpp"
@@ -15,7 +16,6 @@
 #include "core/glue_types.hpp"
 #include "functions/glue_functions.hpp"
 #include "planning/hive_multi_file_reader.hpp"
-#include "planning/hive_query_cache.hpp"
 
 namespace duckdb {
 
@@ -102,6 +102,25 @@ bool ReadDiscoveredPartition(ClientContext &context, const GlueRepairTableBindDa
 	return true;
 }
 
+//! Calls 'callback' for every file below 'directory' as it is listed, keeping none of them: S3 lists the whole tree,
+//! a local file system one directory at a time
+void ListFilesBelow(FileSystem &fs, const string &directory,
+                    const std::function<void(const OpenFileInfo &)> &callback) {
+	vector<string> directories {directory};
+	while (!directories.empty()) {
+		auto current = std::move(directories.back());
+		directories.pop_back();
+		fs.ListFiles(current, [&](OpenFileInfo &info) {
+			info.path = fs.JoinPath(current, info.path);
+			if (FileSystem::IsDirectory(info)) {
+				directories.push_back(std::move(info.path));
+			} else {
+				callback(info);
+			}
+		});
+	}
+}
+
 void GlueRepairTableApply(ClientContext &context, TableFunctionInput &data, GlueRepairTableState &state) {
 	auto &bind_data = data.bind_data->Cast<GlueRepairTableBindData>();
 	auto &catalog = *bind_data.target.catalog;
@@ -118,35 +137,35 @@ void GlueRepairTableApply(ClientContext &context, TableFunctionInput &data, Glue
 	}
 
 	auto root_prefix = bind_data.root + "/";
-	// listed like a scan, but never from glue_cache_listings: a cached listing misses files added after it
-	auto files = HiveQueryCache::Get(context)->GetDirectoryListing(context, bind_data.root)->GetAllFiles();
 	unordered_set<string> seen_directories;
 	// values -> location: the first directory found for the values wins
 	map<vector<string>, string> discovered;
-	for (auto &file : files) {
+	// never from a listing kept by glue_cache_listings (it misses files added after it), and not kept: a table can
+	// hold more files than fit in memory
+	ListFilesBelow(FileSystem::GetFileSystem(context), bind_data.root, [&](const OpenFileInfo &file) {
 		if (!IsDataFile(file, root_prefix)) {
-			continue;
+			return;
 		}
 		auto separator = file.path.find_last_of('/');
 		if (separator == string::npos || separator < root_prefix.size()) {
-			continue;
+			return;
 		}
 		auto directory = file.path.substr(0, separator);
 		if (!seen_directories.insert(directory).second) {
-			continue;
+			return;
 		}
 		auto relative = directory.substr(root_prefix.size());
 		vector<string> values;
 		string partition_directory;
 		if (!ReadDiscoveredPartition(context, bind_data, relative, values, partition_directory)) {
-			continue;
+			return;
 		}
 		auto location = root_prefix + partition_directory;
 		if (existing_values.count(values) || existing_locations.count(location)) {
-			continue;
+			return;
 		}
 		discovered.emplace(std::move(values), std::move(location));
-	}
+	});
 
 	for (auto &entry : discovered) {
 		GluePartitionInput partition;
