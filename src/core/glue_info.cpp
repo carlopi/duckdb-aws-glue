@@ -1,6 +1,6 @@
 #include "core/glue_info.hpp"
 
-#include "catalog/types/type_helpers.hpp"
+#include "core/glue_types.hpp"
 #include "core/helpers.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -374,9 +374,24 @@ string GlueTableInfo::GetMetadataLocation() const {
 	return GetParameter("metadata_location");
 }
 
-optional_idx GluePartitionInfo::FindColumnTypeMismatch(const vector<GlueColumn> &table_columns) const {
-	for (idx_t i = 0; i < MinValue(table_columns.size(), partition_columns.size()); i++) {
-		if (!GlueTypeHelpers::SameColumnType(table_columns[i].type, partition_columns[i].type)) {
+optional_ptr<const GlueColumn> GluePartitionInfo::FindPartitionColumn(const vector<GlueColumn> &table_columns,
+                                                                      idx_t index, bool by_position) const {
+	if (by_position) {
+		return index < partition_columns.size() ? &partition_columns[index] : nullptr;
+	}
+	for (auto &column : partition_columns) {
+		if (StringUtil::CIEquals(column.name, table_columns[index].name)) {
+			return &column;
+		}
+	}
+	return nullptr;
+}
+
+optional_idx GluePartitionInfo::FindColumnTypeMismatch(const vector<GlueColumn> &table_columns,
+                                                       bool by_position) const {
+	for (idx_t i = 0; i < table_columns.size(); i++) {
+		auto partition_column = FindPartitionColumn(table_columns, i, by_position);
+		if (partition_column && !GlueTypes::SameColumnType(table_columns[i].type, partition_column->type)) {
 			return i;
 		}
 	}

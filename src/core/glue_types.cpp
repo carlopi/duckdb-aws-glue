@@ -327,4 +327,22 @@ bool GlueTypes::CanReadPartitionTypeAs(ClientContext &context, const LogicalType
 	return CastFunctionSet::ImplicitCastCost(context, from, to) >= 0;
 }
 
+static string NormalizedHiveType(const string &type) {
+	string result;
+	for (auto c : type) {
+		if (!StringUtil::CharacterIsSpace(c)) {
+			result += StringUtil::CharacterToLower(c);
+		}
+	}
+	return result;
+}
+
+bool GlueTypes::SameColumnType(const string &a, const string &b) {
+	try {
+		return ToLogicalType(StringUtil::Lower(a)) == ToLogicalType(StringUtil::Lower(b));
+	} catch (std::exception &) {
+		return NormalizedHiveType(a) == NormalizedHiveType(b);
+	}
+}
+
 } // namespace duckdb

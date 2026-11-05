@@ -198,6 +198,8 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 	D_ASSERT(existing_table);
 	auto &glue_catalog = existing_table->catalog.Cast<GlueCatalog>();
 	auto partitions = GlueAPI::GetPartitions(context, glue_catalog, table_info.schema_name, table_info.name);
+	// matched as the scan matches the files' columns: by position in csv files, by name otherwise
+	auto columns_by_position = table_info.GetFileFormat() == HiveFileFormat::CSV;
 	auto result = make_uniq<BoundCaseExpression>(LogicalType::VARCHAR);
 	vector<pair<string, vector<string>>> custom_directories;
 	for (auto &partition : partitions) {
@@ -221,7 +223,7 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 			    ExpressionType::COMPARE_NOT_DISTINCT_FROM, make_uniq<BoundReferenceExpression>(types[column_index], i),
 			    make_uniq<BoundConstantExpression>(std::move(value))));
 		}
-		auto mismatch = partition.FindColumnTypeMismatch(table_info.columns);
+		auto mismatch = partition.FindColumnTypeMismatch(table_info.columns, columns_by_position);
 		bool writable;
 		auto relative_path = RelativePartitionPath(location, partition.location, writable);
 		if (!mismatch.IsValid() && relative_path == hive_directory && writable) {
@@ -237,13 +239,15 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 		}
 		if (mismatch.IsValid()) {
 			auto &table_column = table_info.columns[mismatch.GetIndex()];
-			auto &partition_column = partition.partition_columns[mismatch.GetIndex()];
+			auto &partition_column =
+			    *partition.FindPartitionColumn(table_info.columns, mismatch.GetIndex(), columns_by_position);
 			auto message = StringUtil::Format(
 			    "Writing to Hive table '%s.%s' failed: partition [%s] declares column '%s' as '%s', but the table "
 			    "declares column '%s' as '%s'. The table schema changed after the partition was created, and "
 			    "inserting into a partition whose column types differ from the table's is not supported: the new files "
-			    "would not match the types the partition declares. Change the partition's column types to the "
-			    "table's first, e.g. with Hive's ALTER TABLE ... PARTITION (...) CHANGE COLUMN",
+			    "would not match the types the partition declares. Make the partition declare the table's columns "
+			    "first, e.g. by dropping it with glue_drop_partition and adding it again with glue_add_partition, "
+			    "which keeps its files",
 			    table_info.schema_name, table_info.name, StringUtil::Join(partition.values, ", "),
 			    partition_column.name, partition_column.type, table_column.name, table_column.type);
 			check.then_expr = ErrorExpression(context, function_binder, message);
