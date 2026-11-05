@@ -1,6 +1,5 @@
 # name: test/sql/hive/dml/insert/insert_partition_schema_mismatch.test
-# description: INSERT refuses the existing partitions whose column types differ from the table's, as Hive does; columns
-#              are matched as the scan matches them, by name, and by position in csv tables
+# description: INSERT refuses existing partitions whose column types differ from the table's, matched as the scan matches columns
 # group: [insert]
 
 require httpfs
