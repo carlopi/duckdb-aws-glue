@@ -82,19 +82,14 @@ bool GlueSchemaEntry::IsBucketingOption(const string &key) {
 	       StringUtil::CIEquals(key, "SortColumns");
 }
 
-template <idx_t N>
-static string LookupSpelling(const pair<const char *, const char *> (&spellings)[N], const string &key) {
-	for (auto &spelling : spellings) {
-		if (StringUtil::CIEquals(key, spelling.first)) {
-			return spelling.second;
-		}
-	}
-	return string();
+static string LookupSpelling(const case_insensitive_map_t<string> &spellings, const string &key) {
+	auto entry = spellings.find(key);
+	return entry == spellings.end() ? string() : entry->second;
 }
 
 //! The Glue option another spelling of a bucketing option stands for, empty if the key is none of them
 static string BucketingOptionFor(const string &key) {
-	static const pair<const char *, const char *> SPELLINGS[] = {
+	static const case_insensitive_map_t<string> SPELLINGS = {
 	    {"bucket_columns", "BucketColumns"}, {"bucketed_by", "BucketColumns"},
 	    {"clustered_by", "BucketColumns"},   {"number_of_buckets", "NumberOfBuckets"},
 	    {"bucket_count", "NumberOfBuckets"}, {"sort_columns", "SortColumns"},
@@ -104,10 +99,10 @@ static string BucketingOptionFor(const string &key) {
 
 //! The spelling to use for another engine's CREATE TABLE option, empty if the key is none of them
 static string OtherEngineOptionFor(const string &key) {
-	static const pair<const char *, const char *> SPELLINGS[] = {{"partitioned_by", "a PARTITIONED BY (...) clause"},
-	                                                             {"partitioning", "a PARTITIONED BY (...) clause"},
-	                                                             {"external_location", "option 'location'"},
-	                                                             {"field_delimiter", "option 'delimiter'"}};
+	static const case_insensitive_map_t<string> SPELLINGS = {{"partitioned_by", "a PARTITIONED BY (...) clause"},
+	                                                         {"partitioning", "a PARTITIONED BY (...) clause"},
+	                                                         {"external_location", "option 'location'"},
+	                                                         {"field_delimiter", "option 'delimiter'"}};
 	return LookupSpelling(SPELLINGS, key);
 }
 
