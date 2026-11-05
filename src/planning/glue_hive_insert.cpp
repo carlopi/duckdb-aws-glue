@@ -6,6 +6,7 @@
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/catalog/catalog_entry/copy_function_catalog_entry.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
+#include "duckdb/common/map.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
@@ -167,6 +168,42 @@ static unique_ptr<Expression> ErrorExpression(ClientContext &context, FunctionBi
 	    LogicalType::VARCHAR);
 }
 
+//! Fails rows whose string partition value is the one Hive and Glue store a NULL partition value as: such a row has a
+//! directory of its own, but its partition would have the Glue values of the NULL partition
+static void AddNullSentinelChecks(ClientContext &context, FunctionBinder &function_binder,
+                                  const GlueTableInfo &table_info, const vector<Identifier> &names,
+                                  const vector<LogicalType> &types, const vector<idx_t> &partition_columns,
+                                  BoundCaseExpression &result) {
+	for (idx_t i = 0; i < partition_columns.size(); i++) {
+		auto column_index = partition_columns[i];
+		if (types[column_index].id() != LogicalTypeId::VARCHAR) {
+			continue;
+		}
+		BoundCaseCheck check;
+		check.when_expr = BoundComparisonExpression::Create(
+		    ExpressionType::COMPARE_EQUAL, make_uniq<BoundReferenceExpression>(types[column_index], i),
+		    make_uniq<BoundConstantExpression>(Value(HivePartitioning::DEFAULT_PARTITION_NAME)));
+		check.then_expr = ErrorExpression(
+		    context, function_binder,
+		    StringUtil::Format(
+		        "INSERT into Hive table '%s.%s' is not supported: partition key '%s' has the value "
+		        "'%s', which Hive stores a NULL partition value as, so it can not be told apart from NULL",
+		        table_info.schema_name, table_info.name, names[column_index].GetIdentifierName(),
+		        HivePartitioning::DEFAULT_PARTITION_NAME));
+		result.CaseChecksMutable().push_back(std::move(check));
+	}
+}
+
+//! 'result' with 'hive_path' as its ELSE, or 'hive_path' itself when 'result' has no checks
+static unique_ptr<Expression> FinishPartitionPath(unique_ptr<BoundCaseExpression> result,
+                                                  unique_ptr<Expression> hive_path) {
+	if (result->CaseChecks().empty()) {
+		return hive_path;
+	}
+	result->ElseMutable() = std::move(hive_path);
+	return std::move(result);
+}
+
 //! The PARTITION_PATH of the copy: the hive layout (<key>=<value>/...), except for the existing partitions registered
 //! at other locations, which are written to their own location. 'partition_directories' receives the directories of
 //! those partitions with their Glue values.
@@ -187,16 +224,18 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 	}
 	auto hive_path = function_binder.BindScalarFunction(PathJoinFun::GetFunction(), std::move(components));
 
+	auto result = make_uniq<BoundCaseExpression>(LogicalType::VARCHAR);
+	AddNullSentinelChecks(context, function_binder, table_info, names, types, partition_columns, *result);
+
 	// A table created by this CTAS cannot have existing partitions. Planning from
 	// the local definition therefore needs no Glue call and writes every new
 	// partition to the canonical <key>=<value> path below the table location.
 	if (!existing_table) {
-		return hive_path;
+		return FinishPartitionPath(std::move(result), std::move(hive_path));
 	}
 	D_ASSERT(existing_table);
 	auto &glue_catalog = existing_table->catalog.Cast<GlueCatalog>();
 	auto partitions = GlueAPI::GetPartitions(context, glue_catalog, table_info.schema_name, table_info.name);
-	auto result = make_uniq<BoundCaseExpression>(LogicalType::VARCHAR);
 	vector<pair<string, vector<string>>> custom_directories;
 	for (auto &partition : partitions) {
 		if (partition.values.size() != partition_columns.size()) {
@@ -263,11 +302,7 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 		                       StringUtil::Join(custom.second, ", ")));
 		result->CaseChecksMutable().push_back(std::move(check));
 	}
-	if (result->CaseChecks().empty()) {
-		return hive_path;
-	}
-	result->ElseMutable() = std::move(hive_path);
-	return std::move(result);
+	return FinishPartitionPath(std::move(result), std::move(hive_path));
 }
 
 //! The part of a parquet file name before ".parquet" that names its codec, as parquet-mr names them ("snappy." for
@@ -693,6 +728,18 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		to_register.push_back(entry.second);
 	}
 	try {
+		// Glue keeps one partition per list of values: a second directory with the same values would never be read
+		map<vector<string>, string> directory_of_values;
+		for (auto &partition : to_register) {
+			auto entry = directory_of_values.emplace(partition.values, partition.location);
+			if (!entry.second) {
+				throw InvalidInputException(
+				    "INSERT into Hive table '%s.%s' is not supported: rows were written to both "
+				    "'%s' and '%s', which are the same partition [%s]",
+				    table_info.schema_name, table_info.name, entry.first->second, partition.location,
+				    StringUtil::Join(partition.values, ", "));
+			}
+		}
 		// an INSERT registers against the table definition it bound; a CREATE TABLE AS planned from the definition
 		// it was about to create, so the table is fetched as created
 		optional_ptr<const GlueTableInfo> registered = &table_info;
