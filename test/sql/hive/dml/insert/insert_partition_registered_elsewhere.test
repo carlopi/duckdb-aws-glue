@@ -1,0 +1,65 @@
+# name: test/sql/hive/dml/insert/insert_partition_registered_elsewhere.test
+# description: when another client registers a partition at another location while an INSERT writes its rows, the INSERT is rolled back instead of leaving its rows where no partition points
+# group: [insert]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# the fault proxy registers each partition of a BatchCreatePartition on a fault_partition_elsewhere* database at
+# '<location>_by_another_client' first, as another client that won the race would, so Glue refuses each with
+# AlreadyExistsException while the files are at '<location>'
+statement ok
+attach '{GLUE_CATALOG_ID}' as raced_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_partition_elsewhere CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.fault_partition_elsewhere;
+
+statement ok
+CREATE TABLE my_datalake.fault_partition_elsewhere.t (id INTEGER, k VARCHAR) PARTITIONED BY (k);
+
+statement error
+INSERT INTO raced_dl.fault_partition_elsewhere.t VALUES (1, 'x'), (2, 'y');
+----
+<REGEX>:.*was rolled back: Writing to Hive table 'fault_partition_elsewhere.t' failed: rows of partition \[[xy]\] were written to '.*/k=[xy]', but the partition is registered at '.*/k=[xy]_by_another_client'.*
+
+# the INSERT deleted its files, so it neither added rows nor left any behind
+query I
+SELECT count(*) FROM my_datalake.fault_partition_elsewhere.t;
+----
+0
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/fault_partition_elsewhere/t/**');
+----
+0
+
+# an INSERT into the partitions where they are registered appends to them
+statement ok
+INSERT INTO my_datalake.fault_partition_elsewhere.t VALUES (3, 'x');
+
+query II
+SELECT id, k FROM my_datalake.fault_partition_elsewhere.t;
+----
+3	x
+
+statement ok
+DROP SCHEMA my_datalake.fault_partition_elsewhere CASCADE;

@@ -59,6 +59,9 @@ private:
 	                      const GlueTableInfo &table_info, PhysicalOperator &plan, const vector<Identifier> &names,
 	                      const vector<LogicalType> &types, optional_ptr<GlueSchemaEntry> create_schema,
 	                      unique_ptr<BoundCreateTableInfo> create_info);
+	//! Throws when a partition registration skipped as existing is registered at another location than its files
+	void CheckExistingPartitionLocations(ClientContext &context,
+	                                     const vector<GluePartitionInput> &already_existing) const;
 
 public:
 	//! The target catalog (for partition registration after the file write).

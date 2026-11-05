@@ -1,5 +1,5 @@
 # name: test/sql/hive/dml/insert/insert_partition_value_sentinel.test
-# description: a STRING partition value '__HIVE_DEFAULT_PARTITION__' is refused, as Hive stores NULL under that value; every other value, NULL included, is written and read back
+# description: a partition value that is not NULL but that Hive reads back as NULL is refused ('__HIVE_DEFAULT_PARTITION__', and for a BLOB key also 'NULL' and ''); other values, NULL included, are written and read back
 # group: [insert]
 
 require httpfs
@@ -57,13 +57,13 @@ SELECT count(*) FROM glue_partitions('my_datalake.default.pv_sentinel');
 statement error
 INSERT INTO my_datalake.default.pv_sentinel VALUES (1, '__HIVE_DEFAULT_PARTITION__'), (2, NULL);
 ----
-<REGEX>:.*partition key 'k' has the value '__HIVE_DEFAULT_PARTITION__'.*NULL.*
+<REGEX>:.*partition key 'k' has a value \('__HIVE_DEFAULT_PARTITION__'\) that Hive reads back as NULL.*
 
 # ...and on its own, now that the NULL partition exists
 statement error
 INSERT INTO my_datalake.default.pv_sentinel VALUES (1, '__HIVE_DEFAULT_PARTITION__');
 ----
-<REGEX>:.*partition key 'k' has the value '__HIVE_DEFAULT_PARTITION__'.*NULL.*
+<REGEX>:.*partition key 'k' has a value \('__HIVE_DEFAULT_PARTITION__'\) that Hive reads back as NULL.*
 
 # neither INSERT wrote rows or partitions
 query I
@@ -84,7 +84,7 @@ statement error
 CREATE TABLE my_datalake.default.pv_sentinel_new PARTITIONED BY (k) AS
 SELECT * FROM (VALUES (1, '__HIVE_DEFAULT_PARTITION__'), (2, NULL)) t(id, k);
 ----
-<REGEX>:.*partition key 'k' has the value '__HIVE_DEFAULT_PARTITION__'.*NULL.*
+<REGEX>:.*partition key 'k' has a value \('__HIVE_DEFAULT_PARTITION__'\) that Hive reads back as NULL.*
 
 # the second of two partition keys
 statement ok
@@ -96,12 +96,52 @@ CREATE TABLE my_datalake.default.pv_sentinel_two (id INTEGER, a VARCHAR, b VARCH
 statement error
 INSERT INTO my_datalake.default.pv_sentinel_two VALUES (1, 'x', '__HIVE_DEFAULT_PARTITION__'), (2, 'x', NULL);
 ----
-<REGEX>:.*partition key 'b' has the value '__HIVE_DEFAULT_PARTITION__'.*NULL.*
+<REGEX>:.*partition key 'b' has a value \('__HIVE_DEFAULT_PARTITION__'\) that Hive reads back as NULL.*
 
 query I
 SELECT count(*) FROM my_datalake.default.pv_sentinel_two;
 ----
 0
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.pv_sentinel_two');
+----
+0
+
+# a BLOB key reads 'NULL' in any case and '' as NULL too, like every key that is not a string
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pv_sentinel_blob;
+
+statement ok
+CREATE TABLE my_datalake.default.pv_sentinel_blob (id INTEGER, k BLOB) PARTITIONED BY (k);
+
+statement ok
+INSERT INTO my_datalake.default.pv_sentinel_blob VALUES (1, NULL), (2, 'a'::BLOB), (3, 'NULLx'::BLOB), (4, '\xAA\x00'::BLOB);
+
+foreach value __HIVE_DEFAULT_PARTITION__ NULL nUlL
+
+statement error
+INSERT INTO my_datalake.default.pv_sentinel_blob VALUES (5, '{value}'::BLOB);
+----
+<REGEX>:.*partition key 'k' has a value \('__HIVE_DEFAULT_PARTITION__', 'NULL' or ''\) that Hive reads back as NULL.*
+
+endloop
+
+statement error
+INSERT INTO my_datalake.default.pv_sentinel_blob VALUES (5, ''::BLOB);
+----
+<REGEX>:.*partition key 'k' has a value \('__HIVE_DEFAULT_PARTITION__', 'NULL' or ''\) that Hive reads back as NULL.*
+
+query II
+SELECT id, k FROM my_datalake.default.pv_sentinel_blob ORDER BY id;
+----
+1	NULL
+2	a
+3	NULLx
+4	\xAA\x00
+
+statement ok
+DROP TABLE my_datalake.default.pv_sentinel_blob;
 
 # the check is on the partition path, so it holds for every file format
 foreach fmt parquet csv json avro
@@ -115,7 +155,7 @@ CREATE TABLE my_datalake.default.pv_sentinel_{fmt} (id INTEGER, k VARCHAR) PARTI
 statement error
 INSERT INTO my_datalake.default.pv_sentinel_{fmt} VALUES (1, '__HIVE_DEFAULT_PARTITION__'), (2, NULL), (3, 'a/b');
 ----
-<REGEX>:.*partition key 'k' has the value '__HIVE_DEFAULT_PARTITION__'.*NULL.*
+<REGEX>:.*partition key 'k' has a value \('__HIVE_DEFAULT_PARTITION__'\) that Hive reads back as NULL.*
 
 statement ok
 INSERT INTO my_datalake.default.pv_sentinel_{fmt} VALUES (2, NULL), (3, 'a/b'), (4, '__hive_default_partition__');
