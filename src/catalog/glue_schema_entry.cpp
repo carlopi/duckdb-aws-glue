@@ -1,9 +1,11 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_view.hpp"
 #include "catalog/glue_view_names.hpp"
+#include "catalog/scan_filter_equality.hpp"
 
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/catalog/dependency_list.hpp"
+#include "duckdb/catalog/entry_scan_filters.hpp"
 #include "duckdb/parser/parsed_data/comment_on_column_info.hpp"
 #include "duckdb/parser/parsed_data/alter_info.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
@@ -1039,6 +1041,22 @@ void GlueSchemaEntry::Scan(ClientContext &context, CatalogType type,
 
 void GlueSchemaEntry::Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) {
 	throw NotImplementedException("Scan without context not supported for Glue databases");
+}
+
+void GlueSchemaEntry::Scan(ClientContext &context, SchemaScanInfo &info) {
+	string name;
+	if (!CatalogTypeIsSupported(info.type) || !info.filter || info.filter->GetOid() ||
+	    !TryGetNameEquality(info.filter->GetName(), "GlueSchemaEntry::Scan", name)) {
+		SchemaCatalogEntry::Scan(context, info);
+		return;
+	}
+	// tables and views share the set, so the lookup returns whichever Glue holds under the name; the caller keeps
+	// the entries of the type it asked for
+	EntryLookupInfo lookup(info.type, QualifiedName(Identifier(name)));
+	auto entry = tables.GetEntry(context, lookup);
+	if (entry) {
+		info.callback(*entry);
+	}
 }
 
 const GlueDatabaseInfo &GlueSchemaEntry::GetSchemaInfo(ClientContext &context) {
