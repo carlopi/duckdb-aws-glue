@@ -32,8 +32,10 @@
 
 namespace duckdb {
 
-GlueSchemaEntry::GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, GlueDatabaseInfo database_info_p)
-    : SchemaCatalogEntry(catalog, info), database_info(std::move(database_info_p)), tables(*this) {
+GlueSchemaEntry::GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, GlueDatabaseInfo database_info_p,
+                                 bool schema_info_loaded)
+    : SchemaCatalogEntry(catalog, info), tables(*this), database_info(std::move(database_info_p)),
+      schema_info_loaded(schema_info_loaded) {
 }
 
 GlueSchemaEntry::~GlueSchemaEntry() {
@@ -285,6 +287,8 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 			} else {
 				result.csv_escape = string_value;
 			}
+		} else if (StringUtil::CIEquals(key, "overwrite")) {
+			result.overwrite = value.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>();
 		} else if (StringUtil::CIEquals(key, "header")) {
 			// csv files with a header line: Hive's "TBLPROPERTIES ('skip.header.line.count' = '1')"
 			if (value.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>()) {
@@ -431,8 +435,13 @@ GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const Crea
 	if (!options.description.empty()) {
 		table.description = options.description;
 	}
-	table.location =
-	    options.location.empty() ? glue_catalog.GetTableLocation(database_info, table_name) : options.location;
+	if (options.location.empty()) {
+		// the database's LocationUri only matters without DEFAULT_LOCATION, which wins over it
+		auto &database = glue_catalog.options.default_location.empty() ? GetSchemaInfo(context) : database_info;
+		table.location = glue_catalog.GetTableLocation(database, table_name);
+	} else {
+		table.location = options.location;
+	}
 	table.parameters = options.parameters;
 	table.file_format = options.format;
 	if (table.file_format == HiveFileFormat::CSV) {
@@ -506,6 +515,11 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransacti
 	if (existing) {
 		return OnExistingTable(base, database_info.name, table_name);
 	}
+	// CREATE TABLE AS creates its table through CreateTableFromInfo
+	if (!resolved_table_info && base.options.find("overwrite") != base.options.end()) {
+		throw BinderException("CREATE TABLE option 'overwrite' is only for CREATE TABLE ... AS: a table created "
+		                      "without a query writes no files");
+	}
 	auto table = resolved_table_info ? *resolved_table_info : BuildTableInfo(context, base);
 	D_ASSERT(table.name == table_name);
 	D_ASSERT(table.schema_name == database_info.name);
@@ -574,7 +588,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	// the entries the query reads in this catalog, through other views too: the view being replaced is among them
 	// if its new query would read itself under this alias (not when a path reaches it under another alias)
 	LogicalDependencyList reads;
-	Binder::BindView(context, *check, catalog.GetName(), name, &reads, info.aliases, types, names);
+	Binder::BindView(context, *check, catalog.GetName(), GetSchemaPath(), &reads, info.aliases, types, names);
 	if (existing && reads.Contains(*existing)) {
 		throw BinderException("Glue view \"%s.%s\" can not be created: its query reads the view itself",
 		                      database_info.name, view_name);
@@ -1025,6 +1039,32 @@ void GlueSchemaEntry::Scan(ClientContext &context, CatalogType type,
 
 void GlueSchemaEntry::Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) {
 	throw NotImplementedException("Scan without context not supported for Glue databases");
+}
+
+const GlueDatabaseInfo &GlueSchemaEntry::GetSchemaInfo(ClientContext &context) {
+	lock_guard<mutex> guard(schema_info_lock);
+	if (!schema_info_loaded) {
+		GlueDatabaseInfo database;
+		if (!GlueAPI::GetDatabase(context, catalog.Cast<GlueCatalog>(), database_info.name, database)) {
+			throw CatalogException("Glue database \"%s\" no longer exists", database_info.name);
+		}
+		database_info.description = std::move(database.description);
+		database_info.location_uri = std::move(database.location_uri);
+		database_info.parameters = std::move(database.parameters);
+		schema_info_loaded = true;
+	}
+	return database_info;
+}
+
+void GlueSchemaEntry::SetSchemaInfo(const GlueDatabaseInfo &database) {
+	lock_guard<mutex> guard(schema_info_lock);
+	if (schema_info_loaded) {
+		return;
+	}
+	database_info.description = database.description;
+	database_info.location_uri = database.location_uri;
+	database_info.parameters = database.parameters;
+	schema_info_loaded = true;
 }
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::LookupEntry(CatalogTransaction transaction,

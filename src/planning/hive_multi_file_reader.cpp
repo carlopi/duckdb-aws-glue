@@ -1,8 +1,11 @@
 #include "planning/hive_multi_file_reader.hpp"
+#include "core/hive_location.hpp"
 #include "planning/hive_query_cache.hpp"
 #include "planning/stats/hive_stats.hpp"
+#include "core/glue_log_types.hpp"
 
 #include "duckdb/common/algorithm.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
@@ -17,8 +20,12 @@
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/type_visitor.hpp"
+#include "duckdb/parallel/task_executor.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/execution/operator/csv_scanner/csv_reader_options.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -26,6 +33,7 @@
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
@@ -41,6 +49,7 @@
 #include "duckdb/parser/expression/comparison_expression.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/parser/expression/operator_expression.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/query_node/set_operation_node.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
@@ -51,6 +60,7 @@
 #include "duckdb/planner/bound_expression_sql_exporter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/sql_export_helpers.hpp"
+#include "catalog/glue_table.hpp"
 #include "core/glue_types.hpp"
 #include "functions/hive_reader_call.hpp"
 
@@ -89,7 +99,11 @@ shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::Partitions(ClientConte
 			// unpartitioned, or a hive_scan that was given none
 			partitions = make_shared_ptr<const vector<GluePartitionInfo>>();
 		} else {
+			GlueScanEvent event(Describe(), scan_id, "partitions");
 			partitions = GetTablePartitions(context, *this);
+			event.partitions = partitions->size();
+			event.Finish();
+			DUCKDB_LOG(context, GlueScanLogType, event);
 		}
 	}
 	return partitions;
@@ -130,6 +144,118 @@ const GluePartitionInfo &HiveScanInfo::GetPartitionOfFile(const string &path) co
 	// a file is attributed to a partition only after the partitions are loaded, and they are never replaced
 	D_ASSERT(partitions);
 	return (*partitions)[partition_index];
+}
+
+ErrorData HiveScanInfo::PartitionStorageMismatch(const GluePartitionInfo &partition) const {
+	if (!this->table) {
+		return ErrorData();
+	}
+	auto &table = this->table->Cast<GlueTable>().table_info;
+	auto &input_format = partition.input_format.empty() ? table.input_format : partition.input_format;
+	auto &serde_library = partition.serde_library.empty() ? table.serde_library : partition.serde_library;
+	if (StringUtil::CIEquals(input_format, table.input_format) &&
+	    StringUtil::CIEquals(serde_library, table.serde_library) &&
+	    (partition.serde_library.empty() || partition.serde_parameters == table.serde_parameters)) {
+		return ErrorData();
+	}
+	auto partition_storage = table;
+	partition_storage.input_format = input_format;
+	partition_storage.serde_library = serde_library;
+	if (!partition.serde_library.empty()) {
+		partition_storage.serde_parameters = partition.serde_parameters;
+	}
+	string stored_as;
+	auto format = GlueTableFormat::Detect(partition_storage);
+	if (!format.IsHive()) {
+		stored_as = format.Describe(partition_storage);
+	} else {
+		try {
+			auto partition_format = partition_storage.GetFileFormat();
+			if (IsTextFileFormat(partition_format)) {
+				partition_storage.CheckTextSerdeSupported(partition_format);
+			}
+			if (partition_format != file_format) {
+				stored_as = HiveFileFormatToString(partition_format);
+			} else if (partition_format == HiveFileFormat::CSV && partition_storage.GetCSVOptions() != csv_options) {
+				stored_as = "csv with another dialect";
+			} else if (partition_format == HiveFileFormat::JSON &&
+			           partition_storage.GetJSONOptions().ignore_errors != json_options.ignore_errors) {
+				stored_as = "json with other SerDe properties";
+			}
+		} catch (NotImplementedException &) {
+			stored_as = "an unsupported format";
+		}
+	}
+	// the names differ but read alike, e.g. the older parquet.hive.* classes of a Parquet table
+	if (stored_as.empty()) {
+		return ErrorData();
+	}
+	vector<string> spec;
+	for (idx_t i = 0; i < partition_keys.size() && i < partition.values.size(); i++) {
+		spec.push_back(partition_keys[i] + "=" + partition.values[i]);
+	}
+	return ErrorData(
+	    ExceptionType::NOT_IMPLEMENTED,
+	    StringUtil::Format("Partition [%s] of Hive table '%s' is stored as %s (InputFormat '%s', SerDe '%s'), but "
+	                       "the table as %s (SerDe '%s'): partitions stored in a format other than the table's can "
+	                       "not be read yet",
+	                       StringUtil::Join(spec, ", "), Describe(), stored_as, input_format, serde_library,
+	                       HiveFileFormatToString(file_format), table.serde_library));
+}
+
+void HiveScanInfo::VerifyConsistentPartitionSerDe(const GluePartitionInfo &partition) const {
+	auto mismatch = PartitionStorageMismatch(partition);
+	if (mismatch.HasError()) {
+		mismatch.Throw();
+	}
+}
+
+void HiveScanInfo::CheckPartitionColumns(ClientContext &context, const GluePartitionInfo &partition,
+                                         const vector<idx_t> &column_indexes) const {
+	if (partition.partition_columns.empty() || !this->table) {
+		return;
+	}
+	auto &table_columns = this->table->Cast<GlueTable>().table_info.columns;
+	for (auto column_index : column_indexes) {
+		auto &name = names[column_index].GetIdentifierName();
+		optional_ptr<const GlueColumn> partition_column;
+		if (file_format == HiveFileFormat::CSV) {
+			if (column_index < partition.partition_columns.size()) {
+				partition_column = &partition.partition_columns[column_index];
+			}
+		} else {
+			for (auto &column : partition.partition_columns) {
+				if (StringUtil::CIEquals(column.name, name)) {
+					partition_column = &column;
+					break;
+				}
+			}
+		}
+		if (!partition_column) {
+			continue;
+		}
+		LogicalType partition_type;
+		try {
+			partition_type = GlueTypes::ToLogicalType(StringUtil::Lower(partition_column->type));
+		} catch (std::exception &) {
+			// a type the extension can not map is left to the reader
+			continue;
+		}
+		if (GlueTypes::CanReadPartitionTypeAs(context, partition_type, types[column_index])) {
+			continue;
+		}
+		auto table_type =
+		    column_index < table_columns.size() ? table_columns[column_index].type : types[column_index].ToString();
+		vector<string> spec;
+		for (idx_t i = 0; i < partition_keys.size() && i < partition.values.size(); i++) {
+			spec.push_back(partition_keys[i] + "=" + partition.values[i]);
+		}
+		throw InvalidInputException("Partition [%s] of Hive table '%s' declares column '%s' as '%s', which can not be "
+		                            "read as the table's column '%s' of type '%s': the table's columns changed after "
+		                            "the partition was created",
+		                            StringUtil::Join(spec, ", "), Describe(), partition_column->name,
+		                            partition_column->type, name, table_type);
+	}
 }
 
 string HiveScanInfo::Describe() const {
@@ -186,6 +312,28 @@ static void ListDataFiles(ClientContext &context, bool cached, const string &loc
 	}
 }
 
+//! Lists the data files of one partition location
+class ListPartitionTask : public BaseExecutorTask {
+public:
+	ListPartitionTask(TaskExecutor &executor, ClientContext &context, bool cached, const string &location,
+	                  vector<OpenFileInfo> &files)
+	    : BaseExecutorTask(executor), context(context), cached(cached), location(location), files(files) {
+	}
+
+	void ExecuteTask() override {
+		ListDataFiles(context, cached, location, files);
+	}
+	string TaskType() const override {
+		return "ListPartitionTask";
+	}
+
+private:
+	ClientContext &context;
+	bool cached;
+	const string &location;
+	vector<OpenFileInfo> &files;
+};
+
 //===--------------------------------------------------------------------===//
 // HiveMultiFileList
 //===--------------------------------------------------------------------===//
@@ -212,6 +360,26 @@ shared_ptr<const vector<idx_t>> HiveMultiFileList::PartitionIndexes() const {
 	return partition_indexes;
 }
 
+//! hive_partition_listing_threshold: the partitions read from which the table location is listed, when set
+static optional_idx ListingThreshold(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("hive_partition_listing_threshold", setting) && !setting.IsNull()) {
+		return setting.GetValue<idx_t>();
+	}
+	return optional_idx();
+}
+
+//! How many partition directories are listed at the same time when each partition gets its own listing
+static idx_t PartitionsListedTogether(ClientContext &context) {
+	return MaxValue<idx_t>(1, NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()));
+}
+
+//! The keys S3 returns per ListObjectsV2 page
+static constexpr idx_t S3_KEYS_PER_LIST_PAGE = 1000;
+//! When the root and the partitions take as many rounds, how many times its requests the partitions must make for the
+//! root to be listed
+static constexpr idx_t ROOT_REQUESTS_SAVED = 10;
+
 void HiveMultiFileList::PlanListings() const {
 	if (planned) {
 		return;
@@ -222,36 +390,65 @@ void HiveMultiFileList::PlanListings() const {
 		return;
 	}
 	// the partitions below the table root can be listed together
-	auto root = scan_info->root_location;
-	StringUtil::RTrim(root, "/");
+	auto root = ComparableLocation(scan_info->root_location);
 	vector<idx_t> below_root;
 	vector<idx_t> elsewhere;
 	auto partitions = scan_info->Partitions(client_context);
 	auto indexes = PartitionIndexes();
 	for (auto partition_index : *indexes) {
-		auto location = (*partitions)[partition_index].location;
-		StringUtil::RTrim(location, "/");
-		if (!root.empty() && location.size() > root.size() + 1 && StringUtil::StartsWith(location, root + "/")) {
+		auto location = ComparableLocation((*partitions)[partition_index].location);
+		// a location with an empty segment below the root ('t//p=x') holds files the root listing leaves out
+		bool empty_segment = location.find("//", root.size() + 1) != string::npos;
+		if (!root.empty() && location.size() > root.size() + 1 && StringUtil::StartsWith(location, root + "/") &&
+		    !empty_segment) {
 			below_root.push_back(partition_index);
 		} else {
 			elsewhere.push_back(partition_index);
 		}
 	}
-	idx_t threshold = 10;
-	Value setting;
-	if (client_context.TryGetCurrentSetting("hive_partition_listing_threshold", setting) && !setting.IsNull()) {
-		threshold = setting.GetValue<idx_t>();
-	}
-	if (!below_root.empty() && below_root.size() >= threshold) {
-		listing_jobs.push_back(ListingJob {true, std::move(below_root)});
-	} else {
-		for (auto partition_index : below_root) {
-			listing_jobs.push_back(ListingJob {false, {partition_index}});
+	// The root's listing pages through every partition below it one page after another, while the partitions read are
+	// listed together: list the root when that takes fewer rounds of requests, or as many rounds and a tenth of the
+	// requests (on a one page root: ten partitions read). Each partition holds at least one file, so the partitions
+	// below the root bound its pages from below. hive_partition_listing_threshold replaces this with a fixed count of
+	// partitions read
+	auto listed_together = PartitionsListedTogether(client_context);
+	idx_t partitions_below_root = 0;
+	for (auto &partition : *partitions) {
+		auto location = partition.location;
+		StringUtil::RTrim(location, "/");
+		if (!root.empty() && location.size() > root.size() + 1 && StringUtil::StartsWith(location, root + "/")) {
+			partitions_below_root++;
 		}
 	}
-	for (auto partition_index : elsewhere) {
-		listing_jobs.push_back(ListingJob {false, {partition_index}});
+	auto root_pages = (partitions_below_root + S3_KEYS_PER_LIST_PAGE - 1) / S3_KEYS_PER_LIST_PAGE;
+	auto partition_rounds = (below_root.size() + listed_together - 1) / listed_together;
+	auto partition_requests = below_root.size();
+	bool list_root;
+	auto threshold = ListingThreshold(client_context);
+	if (threshold.IsValid()) {
+		list_root = below_root.size() >= threshold.GetIndex();
+	} else {
+		list_root = root_pages < partition_rounds ||
+		            (root_pages == partition_rounds && partition_requests >= ROOT_REQUESTS_SAVED * root_pages);
 	}
+	vector<idx_t> separately;
+	if (!below_root.empty() && list_root) {
+		listing_jobs.push_back(ListingJob {true, std::move(below_root)});
+	} else {
+		separately = std::move(below_root);
+	}
+	separately.insert(separately.end(), elsewhere.begin(), elsewhere.end());
+	// partitions that need their own listing go in batches, and each batch is listed in parallel
+	for (idx_t start = 0; start < separately.size(); start += listed_together) {
+		auto end = MinValue<idx_t>(start + listed_together, separately.size());
+		listing_jobs.push_back(ListingJob {false, vector<idx_t>(separately.begin() + start, separately.begin() + end)});
+	}
+	GlueScanEvent event(scan_info->Describe(), scan_info->scan_id, "plan");
+	event.partitions = partitions->size();
+	event.partitions_read = indexes->size();
+	event.listings = listing_jobs.size();
+	event.detail = listing_jobs.empty() || !listing_jobs[0].root ? "partitions" : "root";
+	DUCKDB_LOG(client_context, GlueScanLogType, event);
 }
 
 void HiveMultiFileList::BuildPartitionLocations() const {
@@ -260,23 +457,53 @@ void HiveMultiFileList::BuildPartitionLocations() const {
 	}
 	partition_locations_built = true;
 	auto partitions = scan_info->Partitions(client_context);
+	unordered_map<string, vector<idx_t>> partitions_by_location;
 	for (idx_t i = 0; i < partitions->size(); i++) {
-		auto location = (*partitions)[i].location;
-		StringUtil::RTrim(location, "/");
+		auto location = ComparableLocation((*partitions)[i].location);
 		if (location.empty()) {
 			continue;
 		}
-		// two partitions on the same location: the first wins, as in AddFile
-		partition_by_location.emplace(std::move(location), i);
+		partition_by_location.emplace(location, i);
+		partitions_by_location[location].push_back(i);
+	}
+	for (auto &entry : partitions_by_location) {
+		if (entry.second.size() > 1) {
+			auto first = entry.second[0];
+			shared_locations.emplace(first, std::move(entry.second));
+		}
 	}
 }
 
+void HiveMultiFileList::ThrowIfLocationShared(idx_t owner, const unordered_set<idx_t> &reading) const {
+	auto shared = shared_locations.find(owner);
+	if (shared == shared_locations.end()) {
+		return;
+	}
+	auto &sharing = shared->second;
+	bool read = false;
+	for (auto index : sharing) {
+		read = read || reading.count(index) > 0;
+	}
+	if (!read) {
+		return;
+	}
+	auto partitions = scan_info->Partitions(client_context);
+	// a file would belong to one of the partitions here, while Hive engines read it once for each of them
+	throw NotImplementedException("Partitions [%s] and [%s] of Hive table '%s' are registered at the same location "
+	                              "'%s', which holds data files DuckDB can not read: register each partition at its "
+	                              "own location",
+	                              StringUtil::Join((*partitions)[sharing[0]].values, ", "),
+	                              StringUtil::Join((*partitions)[sharing[1]].values, ", "), scan_info->Describe(),
+	                              (*partitions)[owner].location);
+}
+
 optional_idx HiveMultiFileList::OwningPartition(const string &file_path, idx_t min_directory_size) const {
-	auto separator = file_path.find_last_of('/');
+	auto path = ComparableLocation(file_path);
+	auto separator = path.find_last_of('/');
 	if (separator == string::npos) {
 		return optional_idx();
 	}
-	auto directory = file_path.substr(0, separator);
+	auto directory = path.substr(0, separator);
 	while (directory.size() >= min_directory_size) {
 		auto entry = partition_by_location.find(directory);
 		if (entry != partition_by_location.end()) {
@@ -291,28 +518,48 @@ optional_idx HiveMultiFileList::OwningPartition(const string &file_path, idx_t m
 	return optional_idx();
 }
 
-void HiveMultiFileList::ListPartition(idx_t partition_index) const {
+void HiveMultiFileList::ListPartitions(const vector<idx_t> &partition_indexes) const {
 	auto partitions = scan_info->Partitions(client_context);
-	auto &partition = (*partitions)[partition_index];
-	if (partition.values.size() != scan_info->partition_keys.size()) {
-		throw InvalidInputException("Partition [%s] of Hive table '%s' has %d values but the table has %d partition "
-		                            "keys",
-		                            StringUtil::Join(partition.values, ", "), scan_info->Describe(),
-		                            partition.values.size(), scan_info->partition_keys.size());
-	}
-	auto location = partition.location;
-	StringUtil::RTrim(location, "/");
-	vector<OpenFileInfo> partition_files;
-	ListDataFiles(client_context, CacheListings(client_context, *scan_info), location, partition_files);
-	BuildPartitionLocations();
-	lock_guard<mutex> guard(scan_info->file_partitions_lock);
-	for (auto &file : partition_files) {
-		// skip files of another partition registered at a location nested inside this one
-		auto owner = OwningPartition(file.path, location.size());
-		if (owner.IsValid() && owner.GetIndex() != partition_index) {
-			continue;
+	vector<string> locations;
+	for (auto partition_index : partition_indexes) {
+		auto &partition = (*partitions)[partition_index];
+		if (partition.values.size() != scan_info->partition_keys.size()) {
+			throw InvalidInputException("Partition [%s] of Hive table '%s' has %d values but the table has %d "
+			                            "partition keys",
+			                            StringUtil::Join(partition.values, ", "), scan_info->Describe(),
+			                            partition.values.size(), scan_info->partition_keys.size());
 		}
-		AddFile(std::move(file), partition_index);
+		auto location = partition.location;
+		StringUtil::RTrim(location, "/");
+		locations.push_back(std::move(location));
+	}
+	// each listing costs at least one S3 round trip, so they run at the same time rather than one after another; the
+	// first error stops the listings not yet started and is thrown
+	vector<vector<OpenFileInfo>> listed(locations.size());
+	auto cached = CacheListings(client_context, *scan_info);
+	// as tasks on DuckDB's threads
+	TaskExecutor executor(client_context);
+	vector<unique_ptr<BaseExecutorTask>> tasks;
+	for (idx_t i = 0; i < locations.size(); i++) {
+		tasks.push_back(make_uniq<ListPartitionTask>(executor, client_context, cached, locations[i], listed[i]));
+	}
+	executor.ScheduleTasks(std::move(tasks));
+	executor.WorkOnTasks();
+	BuildPartitionLocations();
+	unordered_set<idx_t> reading(partition_indexes.begin(), partition_indexes.end());
+	lock_guard<mutex> guard(scan_info->file_partitions_lock);
+	for (idx_t i = 0; i < locations.size(); i++) {
+		auto comparable_size = ComparableLocation(locations[i]).size();
+		for (auto &file : listed[i]) {
+			// skip files of another partition registered at a location nested inside this one
+			auto owner = OwningPartition(file.path, comparable_size);
+			if (owner.IsValid() && owner.GetIndex() != partition_indexes[i]) {
+				ThrowIfLocationShared(owner.GetIndex(), reading);
+				continue;
+			}
+			ThrowIfLocationShared(partition_indexes[i], reading);
+			AddFile(std::move(file), partition_indexes[i]);
+		}
 	}
 }
 
@@ -351,13 +598,18 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 	}
 	BuildPartitionLocations();
 	auto root_prefix = root + "/";
+	auto comparable_size = ComparableLocation(root).size() + 1;
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : files) {
 		if (!IsDataFile(file, root_prefix)) {
 			continue;
 		}
-		auto partition_index = OwningPartition(file.path, root.size() + 1);
-		if (!partition_index.IsValid() || !reading.count(partition_index.GetIndex())) {
+		auto partition_index = OwningPartition(file.path, comparable_size);
+		if (!partition_index.IsValid()) {
+			continue;
+		}
+		ThrowIfLocationShared(partition_index.GetIndex(), reading);
+		if (!reading.count(partition_index.GetIndex())) {
 			continue;
 		}
 		AddFile(std::move(file), partition_index.GetIndex());
@@ -371,19 +623,36 @@ bool HiveMultiFileList::ExpandNextPath() const {
 		return false;
 	}
 	auto &job = listing_jobs[next_job++];
+	GlueScanEvent event(scan_info->Describe(), scan_info->scan_id, "listing");
+	auto files_before = expanded_files.size();
+	string mode;
 	if (scan_info->partition_keys.empty()) {
 		if (scan_info->root_location.empty()) {
 			throw InvalidInputException("Hive table '%s' has no location", scan_info->Describe());
 		}
 		ListDataFiles(client_context, CacheListings(client_context, *scan_info), scan_info->root_location,
 		              expanded_files);
-		return true;
-	}
-	if (job.root) {
-		ListRoot(job.partitions);
+		mode = "table";
 	} else {
-		ListPartition(job.partitions[0]);
+		auto partitions = scan_info->Partitions(client_context);
+		for (auto partition_index : job.partitions) {
+			scan_info->VerifyConsistentPartitionSerDe((*partitions)[partition_index]);
+		}
+		if (job.root) {
+			ListRoot(job.partitions);
+			mode = "root";
+		} else {
+			ListPartitions(job.partitions);
+			mode = "partition";
+		}
 	}
+	if (!scan_info->partition_keys.empty()) {
+		event.partitions_read = job.partitions.size();
+	}
+	event.files = expanded_files.size() - files_before;
+	event.Finish();
+	event.detail = mode;
+	DUCKDB_LOG(client_context, GlueScanLogType, event);
 	return true;
 }
 
@@ -421,7 +690,7 @@ MultiFileCount HiveMultiFileList::GetFileCount(idx_t min_exact_count) const {
 	PlanListings();
 	idx_t remaining = 0;
 	for (idx_t i = next_job; i < listing_jobs.size(); i++) {
-		remaining += listing_jobs[i].root ? MaxValue<idx_t>(listing_jobs[i].partitions.size(), 1) : 1;
+		remaining += MaxValue<idx_t>(listing_jobs[i].partitions.size(), 1);
 	}
 	return MultiFileCount(expanded_files.size() + remaining, FileExpansionType::NOT_ALL_FILES_KNOWN);
 }
@@ -445,11 +714,12 @@ vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 	StringUtil::RTrim(location, "/");
 	vector<OpenFileInfo> listed;
 	ListDataFiles(client_context, CacheListings(client_context, *scan_info), location, listed);
-	// as ListPartition keeps them: not the files of a partition registered at a location nested inside this one
+	// as ListPartitions keeps them: not the files of a partition registered at a location nested inside this one
 	BuildPartitionLocations();
+	auto comparable_size = ComparableLocation(location).size();
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : listed) {
-		auto owner = OwningPartition(file.path, location.size());
+		auto owner = OwningPartition(file.path, comparable_size);
 		if (owner.IsValid() && owner.GetIndex() != partition_index) {
 			continue;
 		}
@@ -463,6 +733,7 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 	auto root = scan_info->root_location;
 	StringUtil::RTrim(root, "/");
 	auto root_prefix = root + "/";
+	auto comparable_root_size = ComparableLocation(root).size() + 1;
 	auto listing = HiveQueryCache::Get(client_context)
 	                   ->GetDirectoryListing(client_context, root, CacheListings(client_context, *scan_info));
 	unordered_set<idx_t> reading(partitions.begin(), partitions.end());
@@ -495,12 +766,12 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 		if (!IsDataFile(file, root_prefix)) {
 			continue;
 		}
-		in_sampled = sampled.IsValid() && StringUtil::StartsWith(file.path, sampled_prefix);
+		in_sampled = sampled.IsValid() && StringUtil::StartsWith(ComparableLocation(file.path), sampled_prefix);
 		if (scan.scan_type == MultiFileListScanType::ALWAYS_FETCH && sampled.IsValid() && !in_sampled) {
 			// pages come in key order, so the sampled partition's files are all seen
 			break;
 		}
-		auto owner = OwningPartition(file.path, root_prefix.size());
+		auto owner = OwningPartition(file.path, comparable_root_size);
 		if (!owner.IsValid()) {
 			continue;
 		}
@@ -510,9 +781,8 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 		}
 		if (!sampled.IsValid() && reading.count(owner.GetIndex())) {
 			sampled = owner;
-			sampled_prefix = (*scan_info->Partitions(client_context))[owner.GetIndex()].location;
-			StringUtil::RTrim(sampled_prefix, "/");
-			sampled_prefix += "/";
+			sampled_prefix =
+			    ComparableLocation((*scan_info->Partitions(client_context))[owner.GetIndex()].location) + "/";
 			in_sampled = true;
 		}
 		files.push_back(file);
@@ -621,6 +891,7 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, BoundTableFunction &function) {
 	auto &context = deserializer.Get<ClientContext &>();
 	auto info = make_shared_ptr<HiveScanInfo>();
+	info->scan_id = HiveQueryCache::Get(context)->NextScanId();
 	info->root_location = deserializer.ReadProperty<string>(103, "location");
 	info->table_name = info->root_location;
 	auto partitions = deserializer.ReadProperty<vector<vector<string>>>(104, "partitions");
@@ -639,7 +910,10 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 	}
 	vector<GluePartitionInfo> partition_infos;
 	for (idx_t i = 0; i < partitions.size(); i++) {
-		partition_infos.push_back({std::move(partitions[i]), std::move(locations[i])});
+		GluePartitionInfo partition;
+		partition.values = std::move(partitions[i]);
+		partition.location = std::move(locations[i]);
+		partition_infos.push_back(std::move(partition));
 	}
 	info->SetPartitions(std::move(partition_infos));
 	unique_ptr<FunctionData> bind_data;
@@ -754,6 +1028,20 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		param_map["nullstr"] = Value(scan_info->csv_options.null_string);
 		// a quoted empty field is an empty string, not NULL (Hive reads it that way, and DuckDB writes it for one)
 		param_map["allow_quoted_nulls"] = Value::BOOLEAN(false);
+		{
+			// Hive reads a line of any length, read_csv none longer than max_line_size (2 MB by default)
+			idx_t max_line_size = HIVE_CSV_DEFAULT_MAX_LINE_SIZE;
+			Value setting;
+			if (context.TryGetCurrentSetting("hive_csv_max_line_size", setting) && !setting.IsNull()) {
+				max_line_size = UBigIntValue::Get(setting);
+			}
+			param_map["max_line_size"] = Value::BIGINT(NumericCast<int64_t>(max_line_size));
+			// a line has to fit in one of the reader's buffers, which hold 32 MB by default
+			auto default_buffer_size = CSVReaderOptions().buffer_size_option.GetValue();
+			if (max_line_size > default_buffer_size) {
+				param_map["buffer_size"] = Value::BIGINT(NumericCast<int64_t>(max_line_size));
+			}
+		}
 		if (scan_info->csv_options.serde_fields) {
 			// as the SerDes do: missing trailing fields are NULL and the fields beyond the last column are ignored
 			param_map["null_padding"] = Value::BOOLEAN(true);
@@ -773,6 +1061,7 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		ExtensionHelper::AutoLoadExtension(context, "json");
 		param_map["columns"] = Value::STRUCT(data_columns);
 		param_map["format"] = Value("newline_delimited");
+		param_map["case_insensitive_keys"] = Value::BOOLEAN(scan_info->json_options.case_insensitive_keys);
 		if (scan_info->json_options.ignore_errors) {
 			param_map["ignore_errors"] = Value::BOOLEAN(true);
 		}
@@ -1192,6 +1481,18 @@ void HiveMultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const M
 	optional_ptr<const GluePartitionInfo> partition;
 	if (!info.partition_keys.empty()) {
 		partition = &info.GetPartitionOfFile(reader_data.reader->GetFileName());
+		vector<idx_t> data_columns;
+		for (auto &column_id : global_column_ids) {
+			if (column_id.IsVirtualColumn()) {
+				continue;
+			}
+			auto column_index = column_id.GetPrimaryIndex();
+			if (info.GetPartitionKeyIndex(global_columns[column_index].name.GetIdentifierName()) ==
+			    DConstants::INVALID_INDEX) {
+				data_columns.push_back(column_index);
+			}
+		}
+		info.CheckPartitionColumns(context, *partition, data_columns);
 	}
 	auto &reader = *reader_data.reader;
 	bool file_metadata_read = false;
@@ -1301,6 +1602,43 @@ static void MakeFalseUnlessTrue(ClientContext &context, unique_ptr<Expression> &
 	                                         make_uniq<BoundConstantExpression>(Value("true")));
 }
 
+//! Make the cast of a field's text to TIMESTAMP make_timestamp_ms(CAST(text AS BIGINT)), and to DATE
+//! DATE '1970-01-01' + CAST(text AS INTEGER), as OpenCSVSerde reads a timestamp and a date
+static void MakeEpoch(ClientContext &context, unique_ptr<Expression> &expr, bool try_cast) {
+	if (!expr || !BoundCastExpression::IsCast(*expr)) {
+		return;
+	}
+	auto is_date = expr->GetReturnType() == LogicalType::DATE;
+	if (!is_date && expr->GetReturnType() != LogicalType::TIMESTAMP) {
+		return;
+	}
+	auto &cast = expr->Cast<BoundFunctionExpression>();
+	if (BoundCastExpression::Child(cast).GetReturnType().id() != LogicalTypeId::VARCHAR) {
+		return;
+	}
+	vector<unique_ptr<Expression>> children;
+	if (is_date) {
+		children.push_back(make_uniq<BoundConstantExpression>(Value::DATE(date_t::epoch())));
+	}
+	children.push_back(BoundCastExpression::AddCastToType(context, std::move(BoundCastExpression::ChildMutable(cast)),
+	                                                      is_date ? LogicalType::INTEGER : LogicalType::BIGINT,
+	                                                      try_cast));
+	FunctionBinder function_binder(context);
+	ErrorData error;
+	auto value = function_binder.BindScalarFunction(
+	    Identifier::DefaultSchema(), Identifier(is_date ? "+" : "make_timestamp_ms"), std::move(children), error);
+	if (!value) {
+		error.Throw();
+	}
+	if (try_cast) {
+		// a number out of the type's range is NULL too
+		auto try_value = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_TRY, value->GetReturnType());
+		try_value->GetChildrenMutable().push_back(std::move(value));
+		value = std::move(try_value);
+	}
+	expr = std::move(value);
+}
+
 ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &reader_data,
                                                            const MultiFileBindData &bind_data,
                                                            const vector<MultiFileColumnDefinition> &global_columns,
@@ -1346,6 +1684,12 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
 			break;
 		case HiveFieldConversion::FALSE_UNLESS_TRUE:
 			MakeFalseUnlessTrue(context, expr);
+			break;
+		case HiveFieldConversion::EPOCH:
+			MakeEpoch(context, expr, false);
+			break;
+		case HiveFieldConversion::TRY_EPOCH:
+			MakeEpoch(context, expr, true);
 			break;
 		}
 	}
@@ -1423,7 +1767,8 @@ static unique_ptr<ParsedExpression> ReaderColumn(const HiveScanInfo &info, const
 		return make_uniq<ColumnRefExpression>(name);
 	}
 	unique_ptr<ParsedExpression> column;
-	switch (info.csv_options.FieldConversion(type)) {
+	auto conversion = info.csv_options.FieldConversion(type);
+	switch (conversion) {
 	case HiveFieldConversion::NONE:
 		return make_uniq<ColumnRefExpression>(name);
 	case HiveFieldConversion::CAST:
@@ -1438,6 +1783,23 @@ static unique_ptr<ParsedExpression> ReaderColumn(const HiveScanInfo &info, const
 		column = make_uniq<ComparisonExpression>(ExpressionType::COMPARE_EQUAL,
 		                                         make_uniq<FunctionExpression>(Identifier("lower"), std::move(lower)),
 		                                         ConstantExpression::FromValue(Value("true")));
+		break;
+	}
+	case HiveFieldConversion::EPOCH:
+	case HiveFieldConversion::TRY_EPOCH: {
+		auto is_date = type == LogicalType::DATE;
+		auto number = make_uniq<CastExpression>(is_date ? LogicalType::INTEGER : LogicalType::BIGINT, BarredField(name),
+		                                        conversion == HiveFieldConversion::TRY_EPOCH);
+		vector<unique_ptr<ParsedExpression>> children;
+		if (is_date) {
+			children.push_back(ConstantExpression::FromValue(Value::DATE(date_t::epoch())));
+		}
+		children.push_back(std::move(number));
+		column = make_uniq<FunctionExpression>(Identifier(is_date ? "+" : "make_timestamp_ms"), std::move(children),
+		                                       nullptr, nullptr, false, is_date);
+		if (conversion == HiveFieldConversion::TRY_EPOCH) {
+			column = make_uniq<OperatorExpression>(ExpressionType::OPERATOR_TRY, std::move(column));
+		}
 		break;
 	}
 	}
