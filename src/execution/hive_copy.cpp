@@ -49,17 +49,16 @@ unique_ptr<GlobalSinkState> GlueHiveCopy::GetGlobalSinkState(ClientContext &cont
 			ThrowIfLocationHoldsFiles(context, table_info, location);
 			auto &create_schema = *schema.get_mutable();
 			auto &catalog = create_schema.catalog;
+			// Record the table on the transaction before creating it, so a failure during or after create still
+			// drops it on rollback.
+			GlueAPI::RegisterTableCleanup(context, catalog.Cast<GlueCatalog>(), table_info.schema_name,
+			                              table_info.name);
 			auto created = create_schema.CreateTableFromInfo(catalog.GetCatalogTransaction(context), *info, table_info);
 			if (!created) {
 				throw CatalogException("Table with name \"%s\" appeared between planning and execution; retry CREATE "
 				                       "TABLE IF NOT EXISTS",
 				                       table_info.name);
 			}
-			// CreateTableFromInfo returns non-null only when this statement actually created the table (null if
-			// it already existed). Record it on the transaction only then: Rollback() drops it, Commit() keeps
-			// it. So CREATE TABLE IF NOT EXISTS on an existing table is never recorded and never dropped.
-			GlueAPI::RegisterTableCleanup(context, catalog.Cast<GlueCatalog>(), table_info.schema_name,
-			                              table_info.name);
 			table_created = true;
 		}
 	}
