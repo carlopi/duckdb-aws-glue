@@ -10,6 +10,7 @@
 #include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/function/function_binder.hpp"
+#include "duckdb/function/scalar/generic_functions.hpp"
 #include "duckdb/function/scalar/string_functions.hpp"
 #include "duckdb/planner/expression/bound_case_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
@@ -30,6 +31,7 @@
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "core/glue_types.hpp"
+#include "core/hive_location.hpp"
 #include "execution/hive_copy.hpp"
 
 namespace duckdb {
@@ -53,6 +55,26 @@ static string DelimiterToString(const string &delimiter) {
 	return result;
 }
 
+//! The scalar function 'name' bound to 'children'
+static unique_ptr<Expression> BindFunction(ClientContext &context, const string &name,
+                                           vector<unique_ptr<Expression>> children) {
+	FunctionBinder function_binder(context);
+	ErrorData error;
+	auto result =
+	    function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier(name), std::move(children), error);
+	if (!result) {
+		error.Throw();
+	}
+	return result;
+}
+
+//! error(message), as a value of 'type'
+static unique_ptr<Expression> RaiseError(ClientContext &context, const string &message, const LogicalType &type) {
+	vector<unique_ptr<Expression>> children;
+	children.push_back(make_uniq<BoundConstantExpression>(Value(message)));
+	return BoundCastExpression::AddCastToType(context, BindFunction(context, "error", std::move(children)), type);
+}
+
 //! The text of a value written to a Hive text file; an error when it holds a 'forbidden' character or is 'null_string'
 static unique_ptr<Expression> CheckedTextField(ClientContext &context, unique_ptr<Expression> value,
                                                const string &forbidden, optional_ptr<const string> null_string,
@@ -63,16 +85,10 @@ static unique_ptr<Expression> CheckedTextField(ClientContext &context, unique_pt
 		pattern += StringUtil::Format("\\x{%02X}", static_cast<uint8_t>(c));
 	}
 	pattern += "]";
-	FunctionBinder function_binder(context);
-	ErrorData error;
 	vector<unique_ptr<Expression>> match_children;
 	match_children.push_back(text->Copy());
 	match_children.push_back(make_uniq<BoundConstantExpression>(Value(pattern)));
-	unique_ptr<Expression> refused = function_binder.BindScalarFunction(
-	    Identifier::DefaultSchema(), Identifier("regexp_matches"), std::move(match_children), error);
-	if (!refused) {
-		error.Throw();
-	}
+	auto refused = BindFunction(context, "regexp_matches", std::move(match_children));
 	if (null_string) {
 		auto conjunction = make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_OR);
 		conjunction->GetChildrenMutable().push_back(std::move(refused));
@@ -80,15 +96,33 @@ static unique_ptr<Expression> CheckedTextField(ClientContext &context, unique_pt
 		    ExpressionType::COMPARE_EQUAL, text->Copy(), make_uniq<BoundConstantExpression>(Value(*null_string))));
 		refused = std::move(conjunction);
 	}
-	vector<unique_ptr<Expression>> error_children;
-	error_children.push_back(make_uniq<BoundConstantExpression>(Value(error_message)));
-	auto raise = function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("error"),
-	                                                std::move(error_children), error);
-	if (!raise) {
-		error.Throw();
-	}
-	raise = BoundCastExpression::AddCastToType(context, std::move(raise), LogicalType::VARCHAR);
+	auto raise = RaiseError(context, error_message, LogicalType::VARCHAR);
 	return make_uniq<BoundCaseExpression>(std::move(refused), std::move(raise), std::move(text));
+}
+
+//! A timestamp or a date as OpenCSVSerde reads it, the milliseconds (truncated) or days since the epoch; an error when
+//! infinite
+static unique_ptr<Expression> EpochField(ClientContext &context, unique_ptr<Expression> value,
+                                         const string &error_message) {
+	vector<unique_ptr<Expression>> infinite_children;
+	infinite_children.push_back(value->Copy());
+	auto infinite = BindFunction(context, "isinf", std::move(infinite_children));
+	unique_ptr<Expression> number;
+	vector<unique_ptr<Expression>> number_children;
+	if (value->GetReturnType() == LogicalType::DATE) {
+		number_children.push_back(std::move(value));
+		number_children.push_back(make_uniq<BoundConstantExpression>(Value::DATE(date_t::epoch())));
+		number = BindFunction(context, "-", std::move(number_children));
+	} else {
+		// epoch_ms rounds to the nearest millisecond, which can move a value into the next day
+		vector<unique_ptr<Expression>> trunc_children;
+		trunc_children.push_back(make_uniq<BoundConstantExpression>(Value("millisecond")));
+		trunc_children.push_back(std::move(value));
+		number_children.push_back(BindFunction(context, "date_trunc", std::move(trunc_children)));
+		number = BindFunction(context, "epoch_ms", std::move(number_children));
+	}
+	auto raise = RaiseError(context, error_message, number->GetReturnType());
+	return make_uniq<BoundCaseExpression>(std::move(infinite), std::move(raise), std::move(number));
 }
 
 static optional_ptr<CopyFunctionCatalogEntry> TryGetCopyFunction(DatabaseInstance &db, const string &name) {
@@ -102,20 +136,35 @@ static optional_ptr<CopyFunctionCatalogEntry> TryGetCopyFunction(DatabaseInstanc
 	return &entry->Cast<CopyFunctionCatalogEntry>();
 }
 
-//! The directory of a partition relative to the table location, empty if the partition is not below it
-static string RelativePartitionPath(const string &table_location, const string &partition_location) {
-	auto prefix = table_location + "/";
-	if (!StringUtil::StartsWith(partition_location, prefix)) {
+//! The directory of a partition relative to the table location, empty if the partition is not below it. s3a:// and
+//! s3:// name the same bucket and key. 'writable' is false when the directory has an empty or '.' segment ('t//p=x'):
+//! the copy drops those, so it would write the files to another directory than the one the partition is read from.
+static string RelativePartitionPath(const string &table_location, const string &partition_location, bool &writable) {
+	writable = true;
+	auto prefix = ComparableLocation(table_location) + "/";
+	auto location = ComparableLocation(partition_location);
+	if (!StringUtil::StartsWith(location, prefix)) {
 		return string();
 	}
-	// normalized like the copy does, so the directories of the written files match
 	vector<string> components;
-	for (auto &component : StringUtil::Split(partition_location.substr(prefix.size()), '/')) {
-		if (!component.empty() && component != ".") {
+	for (auto &component : StringUtil::Split(location.substr(prefix.size()), '/')) {
+		if (component.empty() || component == ".") {
+			writable = false;
+		} else {
 			components.push_back(component);
 		}
 	}
 	return StringUtil::Join(components, "/");
+}
+
+//! A VARCHAR expression that fails the query with 'message' when it is evaluated
+static unique_ptr<Expression> ErrorExpression(ClientContext &context, FunctionBinder &function_binder,
+                                              const string &message) {
+	vector<unique_ptr<Expression>> children;
+	children.push_back(make_uniq<BoundConstantExpression>(Value(message)));
+	return BoundCastExpression::AddCastToType(
+	    context, function_binder.BindScalarFunction(ErrorFun::GetFunction(), std::move(children)),
+	    LogicalType::VARCHAR);
 }
 
 //! The PARTITION_PATH of the copy: the hive layout (<key>=<value>/...), except for the existing partitions registered
@@ -148,6 +197,7 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 	auto &glue_catalog = existing_table->catalog.Cast<GlueCatalog>();
 	auto partitions = GlueAPI::GetPartitions(context, glue_catalog, table_info.schema_name, table_info.name);
 	auto result = make_uniq<BoundCaseExpression>(LogicalType::VARCHAR);
+	vector<pair<string, vector<string>>> custom_directories;
 	for (auto &partition : partitions) {
 		if (partition.values.size() != partition_columns.size()) {
 			throw InvalidInputException("Partition [%s] of Hive table '%s' has %d values, but the table has %d "
@@ -169,8 +219,9 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 			    ExpressionType::COMPARE_NOT_DISTINCT_FROM, make_uniq<BoundReferenceExpression>(types[column_index], i),
 			    make_uniq<BoundConstantExpression>(std::move(value))));
 		}
-		auto relative_path = RelativePartitionPath(location, partition.location);
-		if (relative_path == hive_directory) {
+		bool writable;
+		auto relative_path = RelativePartitionPath(location, partition.location, writable);
+		if (relative_path == hive_directory && writable) {
 			continue;
 		}
 		BoundCaseCheck check;
@@ -181,13 +232,35 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 			conjunction->GetChildrenMutable() = std::move(conditions);
 			check.when_expr = std::move(conjunction);
 		}
-		if (relative_path.empty()) {
+		if (!writable) {
+			check.then_expr = ErrorExpression(
+			    context, function_binder,
+			    StringUtil::Format("INSERT into Hive table '%s.%s' is not supported: partition [%s] is registered at "
+			                       "'%s', whose path has an empty or '.' segment, and DuckDB can not write to it",
+			                       table_info.schema_name, table_info.name, StringUtil::Join(partition.values, ", "),
+			                       partition.location));
+		} else if (relative_path.empty()) {
 			// the copy rejects a partition path that is not below its target
 			check.then_expr = make_uniq<BoundConstantExpression>(Value(partition.location));
 		} else {
 			check.then_expr = make_uniq<BoundConstantExpression>(Value(relative_path));
 			partition_directories.emplace(location + "/" + relative_path, partition.values);
+			custom_directories.emplace_back(relative_path, partition.values);
 		}
+		result->CaseChecksMutable().push_back(std::move(check));
+	}
+	// after the checks of the existing partitions: rows whose own directory is the location of another partition
+	// would be written there and read back as that partition
+	for (auto &custom : custom_directories) {
+		BoundCaseCheck check;
+		check.when_expr = BoundComparisonExpression::Create(ExpressionType::COMPARE_EQUAL, hive_path->Copy(),
+		                                                    make_uniq<BoundConstantExpression>(Value(custom.first)));
+		check.then_expr = ErrorExpression(
+		    context, function_binder,
+		    StringUtil::Format("INSERT into Hive table '%s.%s' is not supported: rows would be written to '%s', the "
+		                       "location of partition [%s], and read back as that partition",
+		                       table_info.schema_name, table_info.name, custom.first,
+		                       StringUtil::Join(custom.second, ", ")));
 		result->CaseChecksMutable().push_back(std::move(check));
 	}
 	if (result->CaseChecks().empty()) {
@@ -312,6 +385,7 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		                                          DelimiterToString(delimiter), null_string);
 		vector<unique_ptr<Expression>> select_list;
 		vector<LogicalType> projected_types;
+		auto csv_options = table_info.GetCSVOptions();
 		for (idx_t i = 0; i < names.size(); i++) {
 			unique_ptr<Expression> column = make_uniq<BoundReferenceExpression>(types[i], i);
 			if (std::find(partition_columns.begin(), partition_columns.end(), i) == partition_columns.end()) {
@@ -319,6 +393,15 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 				                                  "which the table's %s files can not hold in a field",
 				                                  table_info.schema_name, table_info.name, names[i].GetIdentifierName(),
 				                                  reason, quoted ? "OpenCSVSerde" : "LazySimpleSerDe");
+				auto conversion = csv_options.FieldConversion(types[i]);
+				if (conversion == HiveFieldConversion::EPOCH || conversion == HiveFieldConversion::TRY_EPOCH) {
+					column = EpochField(
+					    context, std::move(column),
+					    StringUtil::Format(
+					        "Writing to Hive table '%s.%s' failed: a value of column '%s' is infinite, which the "
+					        "table's OpenCSVSerde files can not hold in a field",
+					        table_info.schema_name, table_info.name, names[i].GetIdentifierName()));
+				}
 				// only unquoted fields can not tell the NULL string from NULL
 				column =
 				    CheckedTextField(context, std::move(column), forbidden, quoted ? nullptr : &null_string, message);
@@ -402,7 +485,7 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	copy_info->options = std::move(copy_options);
 
 	// Hive convention: partition columns live in the directory names, not in the files
-	CopyFunctionBindInput bind_input(*copy_info);
+	CopyFunctionBindInput bind_input(*copy_info, copy_function->function.function_info);
 	bind_input.file_extension = format_name;
 	if (file_format == HiveFileFormat::PARQUET) {
 		// named after the codec, as Spark and Hive name them (<name>.snappy.parquet): readers that list the files can
@@ -494,6 +577,12 @@ PhysicalOperator &GlueHiveInsert::PlanCreateTableAs(ClientContext &context, Phys
 
 	// no Glue call here: PREPARE and prepared statement rebinds plan more than once, the copy creates the table
 	auto &schema = op.schema.Cast<GlueSchemaEntry>();
+	if (op.info->Base().on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT &&
+	    GlueSchemaEntry::ParseCreateTableOptions(context, op.info->Base()).overwrite) {
+		// the files are deleted before the table is created, so a failed replace would leave neither
+		throw NotImplementedException("CREATE OR REPLACE TABLE ... AS with option 'overwrite' is not supported: its "
+		                              "files would be deleted before the table is replaced");
+	}
 	auto &catalog = schema.catalog.Cast<GlueCatalog>();
 	// Catalog::CreateTable would check this, but the copy creates the table through the schema entry
 	auto supported = catalog.SupportsCreateTable(*op.info);

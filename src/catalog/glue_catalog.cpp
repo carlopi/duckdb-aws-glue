@@ -207,7 +207,7 @@ void GlueCatalog::SetDatabaseOption(GlueDatabaseInfo &database, const string &ke
 void GlueCatalog::AlterSchema(CatalogTransaction transaction, SchemaCatalogEntry &schema, AlterSchemaInfo &info) {
 	auto &context = transaction.GetContext();
 	ThrowIfInExplicitTransaction(context);
-	auto schema_name = schema.Cast<GlueSchemaEntry>().database_info.name;
+	auto schema_name = schema.Cast<GlueSchemaEntry>().GetDatabaseName();
 	// work on the current Glue definition, not the cached one
 	GlueDatabaseInfo database;
 	if (!GlueAPI::GetDatabase(context, *this, schema_name, database)) {
@@ -322,7 +322,7 @@ static bool TryGetSchemaNameEquality(optional_ptr<const TableFilter> filter, str
 vector<reference<SchemaCatalogEntry>> GlueCatalog::GetSchemasForScan(ClientContext &context,
                                                                      const SchemaScanFilters &filters) {
 	string name;
-	if (filters.schema_oid || !TryGetSchemaNameEquality(filters.schema_name, name)) {
+	if (filters.GetSchemaOid() || !TryGetSchemaNameEquality(filters.GetSchemaName(), name)) {
 		return Catalog::GetSchemasForScan(context, filters);
 	}
 	vector<reference<SchemaCatalogEntry>> result;
@@ -365,6 +365,68 @@ optional_ptr<SchemaCatalogEntry> GlueCatalog::LookupSchema(CatalogTransaction tr
 		                       schema_name);
 	}
 	return &entry->Cast<SchemaCatalogEntry>();
+}
+
+CatalogEntryLookup GlueCatalog::TryLookupEntryInternal(CatalogTransaction transaction,
+                                                       const EntryLookupInfo &lookup_info) {
+	if (lookup_info.GetAtClause() && !SupportsTimeTravel()) {
+		return {nullptr, nullptr, ErrorData(BinderException("Catalog type does not support time travel"))};
+	}
+	CatalogEntryLookup result {nullptr, nullptr, ErrorData()};
+	auto &catalog = lookup_info.GetCatalog();
+	auto &database_name = lookup_info.GetSchema().GetIdentifierName();
+	// Glue databases are not nested: "x".db.t with an unknown catalog x arrives as [x, db, t]
+	if (lookup_info.GetQualifiedName().Path().size() > 3 || database_name.empty() ||
+	    (!catalog.empty() && !StringUtil::CIEquals(catalog.GetIdentifierName(), GetName().GetIdentifierName()))) {
+		return result;
+	}
+	if (lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY) {
+		switch (TryLookupTableBeforeSchema(transaction, lookup_info, database_name, result)) {
+		case TableLookup::TABLE_FOUND:
+		case TableLookup::TABLE_NOT_FOUND:
+		case TableLookup::SCHEMA_NOT_FOUND:
+			// 'result' holds the table and its schema, the schema alone, or neither
+			return result;
+		case TableLookup::SKIPPED:
+			break;
+		}
+	}
+	auto schema = schemas.GetEntry(transaction.GetContext(), database_name);
+	if (schema) {
+		result.schema = &schema->Cast<SchemaCatalogEntry>();
+		result.entry = result.schema->LookupEntry(transaction, lookup_info);
+	}
+	return result;
+}
+
+TableLookup GlueCatalog::TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
+                                                    const string &database_name, CatalogEntryLookup &result) {
+	// Glue keeps database names in lower case, as GetDatabase would name the schema
+	GlueDatabaseInfo database;
+	database.name = StringUtil::Lower(database_name);
+	if (schemas.GetCachedEntry(database.name)) {
+		return TableLookup::SKIPPED;
+	}
+	auto schema = schemas.CreateSchemaEntry(database, false);
+	auto entry = schema->LookupEntry(transaction, lookup_info);
+	if (!entry) {
+		// the table or its schema is missing: GetDatabase tells which, without asking for the table again
+		auto loaded = schemas.GetEntry(transaction.GetContext(), database.name);
+		if (!loaded) {
+			return TableLookup::SCHEMA_NOT_FOUND;
+		}
+		result.schema = &loaded->Cast<SchemaCatalogEntry>();
+		return TableLookup::TABLE_NOT_FOUND;
+	}
+	// The set's lock is not held across the GetTable above, so another lookup can have added the schema since the
+	// GetCachedEntry check. Then that entry is kept and the regular lookup finds the table in it, from the cache.
+	auto added = schemas.AddEntryIfAbsent(std::move(schema));
+	if (!added) {
+		return TableLookup::SKIPPED;
+	}
+	result.schema = &added->Cast<SchemaCatalogEntry>();
+	result.entry = entry;
+	return TableLookup::TABLE_FOUND;
 }
 
 //! "<12-digit account>" or "<12-digit account>:..."
@@ -412,6 +474,15 @@ void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context) {
 		throw TransactionException("This connection is currently in a transaction. Transaction support is not "
 		                           "provided for Glue catalogs. Please call COMMIT, ABORT or ROLLBACK before trying "
 		                           "the query again");
+	}
+}
+
+void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context, const char *function) {
+	if (!context.transaction.IsAutoCommit()) {
+		throw TransactionException(
+		    "%s changes Glue, which has no transactions, so it can not run inside a transaction: "
+		    "run it as a statement of its own, CALL %s(...), outside BEGIN ... COMMIT",
+		    function, function);
 	}
 }
 
