@@ -33,6 +33,7 @@
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
@@ -48,6 +49,7 @@
 #include "duckdb/parser/expression/comparison_expression.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/parser/expression/operator_expression.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/query_node/set_operation_node.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
@@ -144,12 +146,6 @@ const GluePartitionInfo &HiveScanInfo::GetPartitionOfFile(const string &path) co
 	return (*partitions)[partition_index];
 }
 
-static bool SameCSVDialect(const HiveCSVOptions &a, const HiveCSVOptions &b) {
-	return a.delimiter == b.delimiter && a.quote == b.quote && a.escape == b.escape && a.skip_lines == b.skip_lines &&
-	       a.null_string == b.null_string && a.serde_fields == b.serde_fields &&
-	       a.null_for_invalid_data == b.null_for_invalid_data && a.false_unless_true == b.false_unless_true;
-}
-
 ErrorData HiveScanInfo::PartitionStorageMismatch(const GluePartitionInfo &partition) const {
 	if (!this->table) {
 		return ErrorData();
@@ -180,8 +176,7 @@ ErrorData HiveScanInfo::PartitionStorageMismatch(const GluePartitionInfo &partit
 			}
 			if (partition_format != file_format) {
 				stored_as = HiveFileFormatToString(partition_format);
-			} else if (partition_format == HiveFileFormat::CSV &&
-			           !SameCSVDialect(partition_storage.GetCSVOptions(), csv_options)) {
+			} else if (partition_format == HiveFileFormat::CSV && partition_storage.GetCSVOptions() != csv_options) {
 				stored_as = "csv with another dialect";
 			} else if (partition_format == HiveFileFormat::JSON &&
 			           partition_storage.GetJSONOptions().ignore_errors != json_options.ignore_errors) {
@@ -212,6 +207,54 @@ void HiveScanInfo::VerifyConsistentPartitionSerDe(const GluePartitionInfo &parti
 	auto mismatch = PartitionStorageMismatch(partition);
 	if (mismatch.HasError()) {
 		mismatch.Throw();
+	}
+}
+
+void HiveScanInfo::CheckPartitionColumns(ClientContext &context, const GluePartitionInfo &partition,
+                                         const vector<idx_t> &column_indexes) const {
+	if (partition.partition_columns.empty() || !this->table) {
+		return;
+	}
+	auto &table_columns = this->table->Cast<GlueTable>().table_info.columns;
+	for (auto column_index : column_indexes) {
+		auto &name = names[column_index].GetIdentifierName();
+		optional_ptr<const GlueColumn> partition_column;
+		if (file_format == HiveFileFormat::CSV) {
+			if (column_index < partition.partition_columns.size()) {
+				partition_column = &partition.partition_columns[column_index];
+			}
+		} else {
+			for (auto &column : partition.partition_columns) {
+				if (StringUtil::CIEquals(column.name, name)) {
+					partition_column = &column;
+					break;
+				}
+			}
+		}
+		if (!partition_column) {
+			continue;
+		}
+		LogicalType partition_type;
+		try {
+			partition_type = GlueTypes::ToLogicalType(StringUtil::Lower(partition_column->type));
+		} catch (std::exception &) {
+			// a type the extension can not map is left to the reader
+			continue;
+		}
+		if (GlueTypes::CanReadPartitionTypeAs(context, partition_type, types[column_index])) {
+			continue;
+		}
+		auto table_type =
+		    column_index < table_columns.size() ? table_columns[column_index].type : types[column_index].ToString();
+		vector<string> spec;
+		for (idx_t i = 0; i < partition_keys.size() && i < partition.values.size(); i++) {
+			spec.push_back(partition_keys[i] + "=" + partition.values[i]);
+		}
+		throw InvalidInputException("Partition [%s] of Hive table '%s' declares column '%s' as '%s', which can not be "
+		                            "read as the table's column '%s' of type '%s': the table's columns changed after "
+		                            "the partition was created",
+		                            StringUtil::Join(spec, ", "), Describe(), partition_column->name,
+		                            partition_column->type, name, table_type);
 	}
 }
 
@@ -1438,6 +1481,18 @@ void HiveMultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const M
 	optional_ptr<const GluePartitionInfo> partition;
 	if (!info.partition_keys.empty()) {
 		partition = &info.GetPartitionOfFile(reader_data.reader->GetFileName());
+		vector<idx_t> data_columns;
+		for (auto &column_id : global_column_ids) {
+			if (column_id.IsVirtualColumn()) {
+				continue;
+			}
+			auto column_index = column_id.GetPrimaryIndex();
+			if (info.GetPartitionKeyIndex(global_columns[column_index].name.GetIdentifierName()) ==
+			    DConstants::INVALID_INDEX) {
+				data_columns.push_back(column_index);
+			}
+		}
+		info.CheckPartitionColumns(context, *partition, data_columns);
 	}
 	auto &reader = *reader_data.reader;
 	bool file_metadata_read = false;
@@ -1547,6 +1602,43 @@ static void MakeFalseUnlessTrue(ClientContext &context, unique_ptr<Expression> &
 	                                         make_uniq<BoundConstantExpression>(Value("true")));
 }
 
+//! Make the cast of a field's text to TIMESTAMP make_timestamp_ms(CAST(text AS BIGINT)), and to DATE
+//! DATE '1970-01-01' + CAST(text AS INTEGER), as OpenCSVSerde reads a timestamp and a date
+static void MakeEpoch(ClientContext &context, unique_ptr<Expression> &expr, bool try_cast) {
+	if (!expr || !BoundCastExpression::IsCast(*expr)) {
+		return;
+	}
+	auto is_date = expr->GetReturnType() == LogicalType::DATE;
+	if (!is_date && expr->GetReturnType() != LogicalType::TIMESTAMP) {
+		return;
+	}
+	auto &cast = expr->Cast<BoundFunctionExpression>();
+	if (BoundCastExpression::Child(cast).GetReturnType().id() != LogicalTypeId::VARCHAR) {
+		return;
+	}
+	vector<unique_ptr<Expression>> children;
+	if (is_date) {
+		children.push_back(make_uniq<BoundConstantExpression>(Value::DATE(date_t::epoch())));
+	}
+	children.push_back(BoundCastExpression::AddCastToType(context, std::move(BoundCastExpression::ChildMutable(cast)),
+	                                                      is_date ? LogicalType::INTEGER : LogicalType::BIGINT,
+	                                                      try_cast));
+	FunctionBinder function_binder(context);
+	ErrorData error;
+	auto value = function_binder.BindScalarFunction(
+	    Identifier::DefaultSchema(), Identifier(is_date ? "+" : "make_timestamp_ms"), std::move(children), error);
+	if (!value) {
+		error.Throw();
+	}
+	if (try_cast) {
+		// a number out of the type's range is NULL too
+		auto try_value = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_TRY, value->GetReturnType());
+		try_value->GetChildrenMutable().push_back(std::move(value));
+		value = std::move(try_value);
+	}
+	expr = std::move(value);
+}
+
 ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &reader_data,
                                                            const MultiFileBindData &bind_data,
                                                            const vector<MultiFileColumnDefinition> &global_columns,
@@ -1592,6 +1684,12 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
 			break;
 		case HiveFieldConversion::FALSE_UNLESS_TRUE:
 			MakeFalseUnlessTrue(context, expr);
+			break;
+		case HiveFieldConversion::EPOCH:
+			MakeEpoch(context, expr, false);
+			break;
+		case HiveFieldConversion::TRY_EPOCH:
+			MakeEpoch(context, expr, true);
 			break;
 		}
 	}
@@ -1669,7 +1767,8 @@ static unique_ptr<ParsedExpression> ReaderColumn(const HiveScanInfo &info, const
 		return make_uniq<ColumnRefExpression>(name);
 	}
 	unique_ptr<ParsedExpression> column;
-	switch (info.csv_options.FieldConversion(type)) {
+	auto conversion = info.csv_options.FieldConversion(type);
+	switch (conversion) {
 	case HiveFieldConversion::NONE:
 		return make_uniq<ColumnRefExpression>(name);
 	case HiveFieldConversion::CAST:
@@ -1684,6 +1783,23 @@ static unique_ptr<ParsedExpression> ReaderColumn(const HiveScanInfo &info, const
 		column = make_uniq<ComparisonExpression>(ExpressionType::COMPARE_EQUAL,
 		                                         make_uniq<FunctionExpression>(Identifier("lower"), std::move(lower)),
 		                                         ConstantExpression::FromValue(Value("true")));
+		break;
+	}
+	case HiveFieldConversion::EPOCH:
+	case HiveFieldConversion::TRY_EPOCH: {
+		auto is_date = type == LogicalType::DATE;
+		auto number = make_uniq<CastExpression>(is_date ? LogicalType::INTEGER : LogicalType::BIGINT, BarredField(name),
+		                                        conversion == HiveFieldConversion::TRY_EPOCH);
+		vector<unique_ptr<ParsedExpression>> children;
+		if (is_date) {
+			children.push_back(ConstantExpression::FromValue(Value::DATE(date_t::epoch())));
+		}
+		children.push_back(std::move(number));
+		column = make_uniq<FunctionExpression>(Identifier(is_date ? "+" : "make_timestamp_ms"), std::move(children),
+		                                       nullptr, nullptr, false, is_date);
+		if (conversion == HiveFieldConversion::TRY_EPOCH) {
+			column = make_uniq<OperatorExpression>(ExpressionType::OPERATOR_TRY, std::move(column));
+		}
 		break;
 	}
 	}

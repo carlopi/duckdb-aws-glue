@@ -54,7 +54,9 @@ Text tables are read the way their SerDe reads them:
   file and the field is read as one value, as CSV defines it. `SET hive_csv_parallel = false` reads one thread per
   file in every scan. Hive and Athena v3 split the record at the line break first (TextInputFormat) and return two
   broken rows, a difference this extension does not reproduce. A boolean field is true when it is `true` in any
-  case and false otherwise.
+  case and false otherwise. A timestamp field is a number of milliseconds since the epoch (`1579059880000` is
+  `2020-01-15 03:44:40`) and a date field a number of days since the epoch (`18276` is `2020-01-15`); text such as
+  `2020-01-15 03:44:40` or `2020-01-15` does not parse.
 - Short rows are padded with NULL, extra fields are ignored, and a value that does not parse as its column type is
   NULL, except in OpenCSVSerde tables, where it fails the query unless `use.null.for.invalid.data` is `true`. Fields
   are converted with `TRY_CAST` (`CAST` in OpenCSVSerde tables without the property), which differs from Hive in
@@ -73,7 +75,9 @@ Text tables are read the way their SerDe reads them:
   with `case.insensitive=false` matches them exactly. Keys of one object that differ only in case are duplicate keys.
 - Writes produce files Hive reads back unchanged: LazySimpleSerDe values are unquoted and refused if they hold the
   delimiter or a line break, or equal the NULL string; OpenCSVSerde values are all quoted and refused if they hold a
-  line break.
+  line break, and timestamps and dates are written as milliseconds (truncated) and days since the epoch (an infinite
+  value is refused). NULL is written as an empty field, which reads back as an empty string in a string column,
+  false in a boolean column and NULL elsewhere only with `use.null.for.invalid.data`; otherwise reading it fails.
 - Not supported, for reads and writes: footer lines (`skip.footer.line.count`), header lines in JsonSerDe tables,
   nested columns, multi-byte quote or escape characters, and for LazySimpleSerDe `escape.delim`, a non-UTF-8
   `serialization.encoding`, `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the
@@ -131,6 +135,13 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
   by column name: a column a file does not have (added after the file was written) reads as NULL, a column with
   a different type in the file is cast, and file columns Glue does not list are ignored.
+- A partition declares its own columns, which keep the types they had when the partition was created when the
+  table's columns change later. A scan that reads a column a partition declares with a type that can not be read
+  as the table's type fails, naming the partition and both types. The columns are matched by name, by
+  position for csv tables, and only those the query reads are checked. A partition type reads as the table's when
+  `ALTER COLUMN ... TYPE` could have changed one into the other (integer widening, `float` to `double`, anything to
+  `string`), when DuckDB casts it implicitly (for example `int` to `double` or `decimal`), or between decimals;
+  `bigint` to `int`, `double` to `int` or `string` to `int` do not. Nested types are not checked.
 - Besides `filename`, the scan has three of the metadata columns of Trino's Hive connector, which `SELECT *` leaves out:
   `"$path"` (the data file, as `filename`), `"$file_size"` (`BIGINT`) and `"$file_modified_time"`
   (`TIMESTAMP WITH TIME ZONE`), as the listing reports them. `hive_scan()` has them too.
@@ -348,6 +359,7 @@ query.
 | `CALL glue_rename_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, {dt: '2016-05-15', country: 'IN'})` | `ALTER TABLE PARTITION (...) RENAME TO PARTITION (...)`; changes the values, keeps the location |
 | `CALL glue_set_partition_location('cat.db.t', {dt: '2016-05-14', country: 'IN'}, 's3://...')` | `ALTER TABLE PARTITION (...) SET LOCATION '...'` |
 | `CALL glue_set_table_location('cat.db.t', 's3://...')` | `ALTER TABLE SET LOCATION '...'`; existing partitions keep their locations, new ones land under the new location |
+| `CALL glue_repair_table('cat.db.t')` | `MSCK REPAIR TABLE`: registers the Hive `<key>=<value>` partition directories under the table location that are not in Glue yet; one row per added partition (a typed column per partition key plus `location`) |
 
 The functions that change Glue are called with `CALL`, outside a `BEGIN` transaction, since Glue has no transactions
 (see [Writing](#writing)).
@@ -386,6 +398,13 @@ WHERE (dt IS NULL) <> (partition_values[1] = '__HIVE_DEFAULT_PARTITION__')
    OR (country IS NULL) <> (partition_values[2] = '__HIVE_DEFAULT_PARTITION__');
 ```
 
+`glue_repair_table` lists the table location once (never from a listing kept by `glue_cache_listings`) and registers
+the partitions Glue does not have yet with `BatchCreatePartition`. A partition is a directory with one `<key>=<value>`
+component per partition key, in partition key order (keys compare case-insensitively); it is registered at that
+directory, with the values unescaped and cast to the key types (`year=07` is `7`). Directories that do not follow this
+scheme, whose values do not cast, that are already the location of a partition, or that hold no file a scan would read
+(only `_`/`.` prefixed, `_$folder$` or empty objects) are ignored. It never removes partitions.
+
 Listing the partitions of a table - `glue_partitions`, and planning a scan of a partitioned table - pages through
 Glue's `GetPartitions`. A scan fetches them when planning first needs them (pruning, cardinality), not at bind, so
 `DESCRIBE`, `CREATE VIEW` and `PREPARE` make no `GetPartitions` call; every scan of the table in a query shares one
@@ -393,8 +412,8 @@ fetch. The pages are asked for in parallel with Glue's Segment API:
 `glue_get_partitions_segments` requests run at the same time, each over a segment of the partitions that does not
 overlap with the others. `0`, the default, uses 8 requests against AWS and 1 against a Glue compatible server given
 with `ENDPOINT` (moto ignores `Segment` and answers every segment with the whole table, so the partitions a segment
-already returned are dropped); 10 is the maximum Glue accepts. The responses leave out the column schema every
-partition would otherwise repeat, which is not used: only the partition values and the location are.
+already returned are dropped); 10 is the maximum Glue accepts. The responses include every partition's storage
+descriptor with its columns, which the scan checks the partitions it reads against.
 
 Against AWS, listing the 2526 partitions of a TPC-H SF1 `lineitem` took ~2.1s before and ~0.45s with the default of
 8 segments; `SET glue_get_partitions_segments = 1` restores one request at a time.
