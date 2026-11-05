@@ -20,6 +20,9 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
 );
 
 statement ok
+RESET experimental_glue_view_external_catalog_types;
+
+statement ok
 DROP VIEW IF EXISTS my_datalake.default.rr_nested;
 
 statement ok
@@ -132,22 +135,33 @@ SELECT name FROM pragma_table_info('my_datalake.default.rr_view');
 ----
 which is not in experimental_glue_view_external_catalog_types
 
-# each session reads by its own list: a global one applies to a session that sets none, not to one that does
-statement ok
-SET GLOBAL experimental_glue_view_external_catalog_types = ['duckdb'];
+# global only: a session can not set its own list
+statement error
+SET SESSION experimental_glue_view_external_catalog_types = ['duckdb'];
+----
+cannot be set as a session variable - it can only be set globally
+
+statement error con2
+SET SESSION experimental_glue_view_external_catalog_types = ['duckdb'];
+----
+cannot be set as a session variable - it can only be set globally
+
+# a list set by one connection applies to every connection
+statement ok con2
+SET experimental_glue_view_external_catalog_types = ['duckdb'];
+
+query I
+SELECT id FROM my_datalake.default.rr_view;
+----
+1
 
 query I con2
 SELECT id FROM my_datalake.default.rr_view;
 ----
 1
 
-statement error
-SELECT id FROM my_datalake.default.rr_view;
-----
-of type duckdb, which is not in experimental_glue_view_external_catalog_types
-
 statement ok
-RESET GLOBAL experimental_glue_view_external_catalog_types;
+RESET experimental_glue_view_external_catalog_types;
 
 # nothing listed by default
 statement error con2
@@ -229,3 +243,6 @@ DROP VIEW my_datalake.default.rr_nested;
 
 statement ok
 DROP VIEW my_datalake.default.rr_view;
+
+statement ok
+RESET experimental_glue_view_external_catalog_types;

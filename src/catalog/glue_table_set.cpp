@@ -136,14 +136,6 @@ void GlueTableSet::BulkLoadTableInfo(ClientContext &context, GlueTransactionCach
 
 optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const EntryLookupInfo &lookup) {
 	auto &name = lookup.GetEntryName();
-	// a view handed out is noted for its GetQuery (GlueView::NoteReader); anything else leaves no note
-	GlueView::ForgetReader();
-	auto handed_out = [&](CatalogEntry &entry) -> optional_ptr<CatalogEntry> {
-		if (entry.type == CatalogType::VIEW_ENTRY) {
-			entry.Cast<GlueView>().NoteReader(context);
-		}
-		return &entry;
-	};
 	// the reader's Glue transaction keeps the entry alive while it is used (GlueTransactionManager::RetireEntry); it
 	// is started before entry_lock is taken, the order RetireEntry takes the locks in
 	Transaction::Get(context, catalog);
@@ -189,12 +181,12 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 	// another lookup may have replaced the entry while Glue was asked: compare with what is there now
 	auto existing = entries.find(table->name);
 	if (existing != entries.end() && GetTableInfo(*existing->second).IsSameVersion(*table)) {
-		return handed_out(*existing->second);
+		return existing->second.get();
 	}
 	// new, or another client changed it since the entry was built: a statement that bound the old entry keeps it
 	RetireEntry(table->name);
 	auto result = entries.emplace(table->name, CreateEntry(*table));
-	return handed_out(*result.first->second);
+	return result.first->second.get();
 }
 
 const GlueTableInfo &GlueTableSet::GetTableInfo(const CatalogEntry &entry) {

@@ -240,8 +240,8 @@ this connection's cache: a write through it, a rollback, or DETACH.
 - A column in the SELECT can not start with the name of another catalog the view reads (`cat.db.t.col`,
   `* EXCLUDE (cat.db.t.col)`), or with its own catalog's name as a row reference (`cat.t`), even when that name is a
   table, alias or column: use a table alias with another name.
-- With `SET experimental_glue_view_external_catalog_types = ['duckdb', 'iceberg']` (empty by default), views can also
-  read tables of catalogs of those types, stored as `"external:<type>:<alias>".<schema>.<table>` and read wherever a
+- With `SET experimental_glue_view_external_catalog_types = ['duckdb', 'iceberg']` (empty by default; global only, so
+  it applies to every connection and `SET SESSION` is refused), views can also read tables of catalogs of those types, stored as `"external:<type>:<alias>".<schema>.<table>` and read wherever a
   catalog of that type is attached under that alias, never from one in memory, temporary, system or attached hidden. A
   bare table name in a body written to Glue by other means is read from the view's own Glue database.
 - `SHOW [ALL] TABLES`, `duckdb_views()`, `information_schema.views` and `duckdb_columns()` list every view of a database,

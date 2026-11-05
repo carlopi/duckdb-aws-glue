@@ -19,15 +19,10 @@ public:
 
 public:
 	const SelectStatement &GetQuery() override;
-	//! Notes the reader first: catalog functions bind views without a lookup
-	void BindView(ClientContext &context, BindViewAction action = BindViewAction::BIND_IF_UNBOUND) override;
 	unique_ptr<CatalogEntry> Copy(ClientContext &context) const override;
 	//! The stored text, without parsing it
 	string ToSQL() const override;
 
-	//! For this view's next GetQuery on this thread: the session's external catalog types
-	void NoteReader(ClientContext &context);
-	static void ForgetReader();
 	//! Build the view entry for a VIRTUAL_VIEW Glue table
 	static unique_ptr<GlueView> FromTableInfo(Catalog &catalog, SchemaCatalogEntry &schema, const GlueTableInfo &table);
 	//! The SELECT shown for the view (ViewOriginalText): the query as DuckDB prints it; the column alias list is

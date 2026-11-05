@@ -10,49 +10,6 @@
 
 namespace duckdb {
 
-namespace {
-
-//! GetQuery has no context: noted per thread by the Glue lookup or BindView of the view; none -> no non-Glue catalog
-struct ReaderNote {
-	optional_ptr<const GlueView> view;
-	case_insensitive_set_t external_types;
-};
-
-thread_local ReaderNote reader_note;
-
-//! The note for this view, cleared; empty if there is none
-case_insensitive_set_t TakeReaderTypes(const GlueView &view) {
-	case_insensitive_set_t types;
-	if (reader_note.view.get() == &view) {
-		types = std::move(reader_note.external_types);
-	}
-	GlueView::ForgetReader();
-	return types;
-}
-
-} // namespace
-
-void GlueView::NoteReader(ClientContext &context) {
-	reader_note.view = this;
-	reader_note.external_types = GlueViewNames::ExternalCatalogTypes(context);
-}
-
-void GlueView::ForgetReader() {
-	reader_note.view = nullptr;
-	reader_note.external_types.clear();
-}
-
-void GlueView::BindView(ClientContext &context, BindViewAction action) {
-	NoteReader(context);
-	try {
-		ViewCatalogEntry::BindView(context, action);
-	} catch (...) {
-		ForgetReader();
-		throw;
-	}
-	ForgetReader();
-}
-
 GlueView::GlueView(Catalog &catalog, SchemaCatalogEntry &schema, CreateViewInfo &info, GlueTableInfo table_info_p,
                    string select_sql_p, string unsupported_reason_p)
     : ViewCatalogEntry(catalog, schema, info), table_info(std::move(table_info_p)), select_sql(std::move(select_sql_p)),
@@ -62,7 +19,6 @@ GlueView::GlueView(Catalog &catalog, SchemaCatalogEntry &schema, CreateViewInfo 
 }
 
 const SelectStatement &GlueView::GetQuery() {
-	auto external_types = TakeReaderTypes(*this);
 	if (!IsSupported()) {
 		throw BinderException("Glue view \"%s.%s\" can not be queried: %s", table_info.schema_name, table_info.name,
 		                      unsupported_reason);
@@ -90,6 +46,7 @@ const SelectStatement &GlueView::GetQuery() {
 		return *parsed;
 	}
 	// a non-Glue catalog's table needs its type listed; the smallest refused id, for a stable error
+	auto external_types = GlueViewNames::ExternalCatalogTypes(catalog.GetDatabase());
 	optional_ptr<const Identifier> refused;
 	for (auto &id : referenced_ids) {
 		if (GlueViewNames::IsExternal(id) && !external_types.count(GlueViewNames::ExternalType(id)) &&

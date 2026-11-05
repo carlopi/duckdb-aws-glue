@@ -6,6 +6,7 @@
 
 namespace duckdb {
 class ClientContext;
+class DatabaseInstance;
 class GlueCatalog;
 
 //! ViewExpandedText names tables of the view's own catalog <db>.<table>, of other Glue catalogs
@@ -20,8 +21,8 @@ struct GlueViewNames {
 	                              QueryNode &query);
 	//! the catalog ids the stored body names tables by
 	static identifier_set_t ReferencedCatalogIds(QueryNode &query);
-	//! experimental_glue_view_external_catalog_types
-	static case_insensitive_set_t ExternalCatalogTypes(ClientContext &context);
+	//! experimental_glue_view_external_catalog_types (global only)
+	static case_insensitive_set_t ExternalCatalogTypes(DatabaseInstance &db);
 	//! "external:<type>:<alias>", the prefix in any case
 	static bool IsExternal(const Identifier &id);
 	//! for an IsExternal id

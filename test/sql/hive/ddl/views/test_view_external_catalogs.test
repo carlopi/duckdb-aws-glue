@@ -37,6 +37,9 @@ CREATE TABLE my_datalake.default.ex_orders (id INTEGER, qty INTEGER);
 statement ok
 INSERT INTO my_datalake.default.ex_orders VALUES (1, 10), (2, 20);
 
+statement ok
+RESET experimental_glue_view_external_catalog_types;
+
 # off by default
 statement error
 CREATE VIEW my_datalake.default.ex_view_join AS SELECT o.id, o.qty, ex_items.name FROM my_datalake.default.ex_orders o JOIN ext1.main.ex_items USING (id);
@@ -106,3 +109,6 @@ DROP VIEW my_datalake.default.ex_view_join;
 
 statement ok
 DROP TABLE my_datalake.default.ex_orders;
+
+statement ok
+RESET experimental_glue_view_external_catalog_types;

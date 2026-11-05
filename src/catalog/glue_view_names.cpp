@@ -9,6 +9,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/database.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/expression/star_expression.hpp"
@@ -240,10 +241,10 @@ bool UsableExternalCatalog(Catalog &catalog) {
 
 } // namespace
 
-case_insensitive_set_t GlueViewNames::ExternalCatalogTypes(ClientContext &context) {
+case_insensitive_set_t GlueViewNames::ExternalCatalogTypes(DatabaseInstance &db) {
 	case_insensitive_set_t types;
 	Value setting;
-	if (!context.TryGetCurrentSetting("experimental_glue_view_external_catalog_types", setting) || setting.IsNull()) {
+	if (!db.TryGetCurrentSetting("experimental_glue_view_external_catalog_types", setting) || setting.IsNull()) {
 		return types;
 	}
 	for (auto &type : ListValue::GetChildren(setting)) {
@@ -288,7 +289,7 @@ void GlueViewNames::QualifyForStorage(ClientContext &context, GlueCatalog &view_
 			}
 			auto &catalog = entry->ParentCatalog();
 			if (catalog.GetCatalogType() != "glue") {
-				if (!ExternalCatalogTypes(context).count(catalog.GetCatalogType())) {
+				if (!ExternalCatalogTypes(DatabaseInstance::GetDatabase(context)).count(catalog.GetCatalogType())) {
 					throw BinderException("Glue view references \"%s\" in catalog \"%s\" of type %s, which is not in "
 					                      "experimental_glue_view_external_catalog_types: add '%s' to it",
 					                      name.ToString(), catalog.GetName().GetIdentifierName(),
