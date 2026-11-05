@@ -7,7 +7,6 @@
 
 #pragma once
 
-#include "duckdb/common/exception.hpp"
 #include "duckdb/planner/extension_callback.hpp"
 
 #include "core/glue_info.hpp"
@@ -19,6 +18,8 @@ class GlueTable;
 //! Gives the scans of a Glue table the credentials to read its files with, as the name of a secret that every listed
 //! file names in its options (ExtendedOpenFileInfo::SECRET_OPTION). An extension registers one as an
 //! ExtensionCallback; without one, every file is read with the secret that matches its path.
+//! The callback is found with dynamic_cast, so the extension must be linked into the same binary as this one: one
+//! LOADed as a separate library does not share the type and is not found.
 class GlueFileCredentialsCallback : public ExtensionCallback {
 public:
 	//! Whether the scans of `table`, whose definition Glue returned as `table_info` for this query, read with
@@ -31,28 +32,11 @@ public:
 	virtual string GetFileSecret(ClientContext &context, const GlueTable &table, const GlueTableInfo &table_info) = 0;
 
 	//! The registered callback, if any. Throws when more than one is.
-	static optional_ptr<GlueFileCredentialsCallback> Find(ClientContext &context) {
-		optional_ptr<GlueFileCredentialsCallback> found;
-		for (auto &callback : ExtensionCallback::Iterate(context)) {
-			auto credentials_callback = dynamic_cast<GlueFileCredentialsCallback *>(callback.get());
-			if (!credentials_callback) {
-				continue;
-			}
-			if (found) {
-				throw InvalidConfigurationException("More than one extension registered a GlueFileCredentialsCallback");
-			}
-			found = credentials_callback;
-		}
-		return found;
-	}
-	static bool Has(ClientContext &context, const GlueTable &table, const GlueTableInfo &table_info) {
-		auto found = Find(context);
-		return found && found->HasFileCredentials(context, table, table_info);
-	}
-	static string Get(ClientContext &context, const GlueTable &table, const GlueTableInfo &table_info) {
-		auto found = Find(context);
-		return found ? found->GetFileSecret(context, table, table_info) : string();
-	}
+	static optional_ptr<GlueFileCredentialsCallback> Find(ClientContext &context);
+	//! HasFileCredentials of the registered callback; false without one
+	static bool Has(ClientContext &context, const GlueTable &table, const GlueTableInfo &table_info);
+	//! GetFileSecret of the registered callback; "" without one
+	static string Get(ClientContext &context, const GlueTable &table, const GlueTableInfo &table_info);
 };
 
 } // namespace duckdb

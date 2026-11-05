@@ -348,10 +348,11 @@ as the Glue table it reads, by name; a `hive_scan()` call then cannot be rendere
 An extension can give the scans of a Glue table credentials of their own, for example credentials a governance
 service vends for that table. It registers a `GlueFileCredentialsCallback`
 ([glue_file_credentials.hpp](../src/include/catalog/glue_file_credentials.hpp)) as an `ExtensionCallback`, which this
-extension asks each time a scan of a Hive table is bound. The callback answers with the name of a secret, typically one
-it created for the transaction (`SecretPersistType::TRANSACTION`). Every file the scan lists then names that secret in
-its options (`ExtendedOpenFileInfo::SECRET_OPTION`), and DuckDB opens it with that secret instead of the one that
-matches its path. Without a callback, or when it returns no name, the files are read as above.
+extension asks each time a scan of a Hive table is bound. The callback's extension must be linked into the same binary
+as this one (it is found with `dynamic_cast`); one `LOAD`ed as a separate library is not found. The callback answers
+with the name of a secret, typically one it created for the transaction (`SecretPersistType::TRANSACTION`). Every file
+the scan lists then names that secret in its options (`ExtendedOpenFileInfo::SECRET_OPTION`), and DuckDB opens it with
+that secret instead of the one that matches its path. Without a callback, or when it returns no name, the files are read as above.
 
 - The listings themselves are made by path: DuckDB's globs name no secret. A secret of the transaction takes part in
   the path lookup, so a listing under its scope is made with it. So does every other read by path under its scope in
@@ -361,8 +362,8 @@ matches its path. Without a callback, or when it returns no name, the files are 
   not cover it, fails to open rather than being read by path.
 - `glue_cache_listings` does not keep the listings of a scan with credentials beyond the query.
 - A scan with credentials serializes the name of its secret; `EXPLAIN (SQL)` renders it as the Glue table by name.
-- INSERT into a table whose scans read with credentials is refused: a write opens its files by path. The check asks
-  the callback's `HasFileCredentials`, which creates no secret.
+- INSERT into a table whose scans read with credentials, and `glue_repair_table` of one, are refused: they list or
+  write its files by path. The check asks the callback's `HasFileCredentials`, which creates no secret.
 
 The tests under `test/sql/file_credentials/` give tables credentials with the test extension `glue_test_credentials`
 (`test/extension/glue_test_credentials/`), which must share a binary with this extension; `extension_config.cmake`

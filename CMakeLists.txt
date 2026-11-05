@@ -55,13 +55,7 @@ if(BUILD_UNITTESTS
   add_subdirectory(test/unittest)
 endif()
 
-# The GlueFileCredentialsCallback the tests under test/sql/file_credentials load
-# with 'require glue_test_credentials'. Test-only, so linked into unittest
-# alone, the way DuckDB links debug_fs; it must share a binary with this
-# extension. DuckDB decides which extensions it links
-# (DUCKDB_EXTENSION_GLUE_SHOULD_LINK) only after it has added every extension's
-# directory, so it is built when the extension is built, and its own
-# CMakeLists.txt links it only when the extension is linked.
+# test-only GlueFileCredentialsCallback, linked into unittest
 if(BUILD_UNITTESTS
    AND NOT CLANG_TIDY
    AND DUCKDB_EXTENSION_GLUE_SHOULD_BUILD)

@@ -330,13 +330,13 @@ static void ListDataFiles(ClientContext &context, bool cached, const string &loc
 class ListPartitionTask : public BaseExecutorTask {
 public:
 	ListPartitionTask(TaskExecutor &executor, ClientContext &context, bool cached, const string &location,
-	                  const string &file_secret, vector<OpenFileInfo> &files)
-	    : BaseExecutorTask(executor), context(context), cached(cached), location(location), file_secret(file_secret),
-	      files(files) {
+	                  vector<OpenFileInfo> &files)
+	    : BaseExecutorTask(executor), context(context), cached(cached), location(location), files(files) {
 	}
 
+	//! without the file secret: AddFile carries it
 	void ExecuteTask() override {
-		ListDataFiles(context, cached, location, file_secret, files);
+		ListDataFiles(context, cached, location, string(), files);
 	}
 	string TaskType() const override {
 		return "ListPartitionTask";
@@ -346,7 +346,6 @@ private:
 	ClientContext &context;
 	bool cached;
 	const string &location;
-	const string &file_secret;
 	vector<OpenFileInfo> &files;
 };
 
@@ -557,8 +556,7 @@ void HiveMultiFileList::ListPartitions(const vector<idx_t> &partition_indexes) c
 	TaskExecutor executor(client_context);
 	vector<unique_ptr<BaseExecutorTask>> tasks;
 	for (idx_t i = 0; i < locations.size(); i++) {
-		tasks.push_back(make_uniq<ListPartitionTask>(executor, client_context, cached, locations[i],
-		                                             scan_info->file_secret, listed[i]));
+		tasks.push_back(make_uniq<ListPartitionTask>(executor, client_context, cached, locations[i], listed[i]));
 	}
 	executor.ScheduleTasks(std::move(tasks));
 	executor.WorkOnTasks();

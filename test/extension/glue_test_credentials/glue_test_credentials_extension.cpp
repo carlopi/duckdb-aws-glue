@@ -42,11 +42,13 @@ struct RecordedRead {
 	//! The key id of the secret it was read with: the one it names, else the one that matches its path; empty when
 	//! there is none, or the named secret refused the path
 	string key_id;
+	//! A FileSystem::ListFiles call rather than an open or a glob
+	bool list_files;
 };
 
-//! Serves the local files below 'root', as the local file system does, and records each open and listing with the
-//! secret it is read with. Like httpfs's S3 file system, it reads the secret a file names, which refuses a path outside
-//! its scope, or else the one that matches its path.
+//! Serves the local files below 'root', as the local file system does, and records each open, glob and listing with
+//! the secret it is read with. Like httpfs's S3 file system, it reads the secret a file names, which refuses a path
+//! outside its scope, or else the one that matches its path.
 class RecordingFileSystem : public LocalFileSystem {
 public:
 	explicit RecordingFileSystem(string root_p) : root(std::move(root_p)) {
@@ -59,9 +61,16 @@ public:
 		return StringUtil::StartsWith(path, root);
 	}
 
-	vector<RecordedRead> Reads() {
+	//! The opens and globs, or with `list_files` the ListFiles calls
+	vector<RecordedRead> Reads(bool list_files) {
 		lock_guard<mutex> guard(lock);
-		return reads;
+		vector<RecordedRead> result;
+		for (auto &read : reads) {
+			if (read.list_files == list_files) {
+				result.push_back(read);
+			}
+		}
+		return result;
 	}
 	void Clear() {
 		lock_guard<mutex> guard(lock);
@@ -84,15 +93,22 @@ protected:
 		Record(OpenFileInfo(path), true, false, opener);
 		return LocalFileSystem::GlobFilesExtended(path, input, opener);
 	}
+	//! Kept apart from the opens and globs: the local glob lists its directories through this, lazily
+	bool ListFilesExtended(const string &directory, const std::function<void(OpenFileInfo &info)> &callback,
+	                       optional_ptr<FileOpener> opener) override {
+		Record(OpenFileInfo(directory), true, false, opener, true);
+		return LocalFileSystem::ListFilesExtended(directory, callback, opener);
+	}
 
 private:
-	void Record(const OpenFileInfo &file, bool listing, bool names_secret, optional_ptr<FileOpener> opener) {
+	void Record(const OpenFileInfo &file, bool listing, bool names_secret, optional_ptr<FileOpener> opener,
+	            bool list_files = false) {
 		// recorded before the secret is read, so that a read the named secret refuses is recorded
 		idx_t index;
 		{
 			lock_guard<mutex> guard(lock);
 			index = reads.size();
-			reads.push_back(RecordedRead {file.path, listing, names_secret, string()});
+			reads.push_back(RecordedRead {file.path, listing, names_secret, string(), list_files});
 		}
 		if (!opener) {
 			if (names_secret) {
@@ -302,10 +318,10 @@ struct ReadsBindData : public TableFunctionData {
 	vector<RecordedRead> reads;
 };
 
-unique_ptr<FunctionData> ReadsBind(ClientContext &context, TableFunctionBindInput &input,
-                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
+unique_ptr<FunctionData> BindRecordedReads(ClientContext &context, bool list_files, vector<LogicalType> &return_types,
+                                           vector<Identifier> &names) {
 	auto result = make_uniq<ReadsBindData>();
-	result->reads = GetRecording(context).Reads();
+	result->reads = GetRecording(context).Reads(list_files);
 	names.emplace_back("path");
 	return_types.push_back(LogicalType::VARCHAR);
 	names.emplace_back("listing");
@@ -317,6 +333,16 @@ unique_ptr<FunctionData> ReadsBind(ClientContext &context, TableFunctionBindInpu
 	return std::move(result);
 }
 
+unique_ptr<FunctionData> ReadsBind(ClientContext &context, TableFunctionBindInput &input,
+                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
+	return BindRecordedReads(context, false, return_types, names);
+}
+
+unique_ptr<FunctionData> ListFilesBind(ClientContext &context, TableFunctionBindInput &input,
+                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
+	return BindRecordedReads(context, true, return_types, names);
+}
+
 struct ReadsState : public GlobalTableFunctionState {
 	idx_t offset = 0;
 };
@@ -325,8 +351,8 @@ unique_ptr<GlobalTableFunctionState> ReadsInit(ClientContext &context, TableFunc
 	return make_uniq<ReadsState>();
 }
 
-//! FROM glue_test_credentials_reads(): the opens and listings recorded since the last clear, in order. key_id is NULL
-//! for a read whose credentials gave it no secret, and for a read without credentials.
+//! FROM glue_test_credentials_reads(): the opens and globs recorded since the last clear, in order; FROM
+//! glue_test_credentials_list_files(): the ListFiles calls. key_id is NULL for a read no secret gave a key.
 void ReadsScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &reads = data.bind_data->Cast<ReadsBindData>().reads;
 	auto &state = data.global_state->Cast<ReadsState>();
@@ -363,6 +389,7 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(
 	    PragmaFunction::PragmaStatement(Identifier("glue_test_credentials_clear_reads"), ClearReads));
 	loader.RegisterFunction(TableFunction("glue_test_credentials_reads", {}, ReadsScan, ReadsBind, ReadsInit));
+	loader.RegisterFunction(TableFunction("glue_test_credentials_list_files", {}, ReadsScan, ListFilesBind, ReadsInit));
 	loader.RegisterFunction(
 	    PragmaFunction::PragmaStatement(Identifier("glue_test_credentials_register"), RegisterSecondCallback));
 }
