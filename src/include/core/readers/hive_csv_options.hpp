@@ -43,6 +43,8 @@ struct HiveCSVOptions {
 public:
 	//! With serde_fields: how a field becomes a value of a column of 'type', in the scan and in its reader call
 	HiveFieldConversion FieldConversion(const LogicalType &type) const;
+	bool operator==(const HiveCSVOptions &other) const;
+	bool operator!=(const HiveCSVOptions &other) const;
 	void Serialize(Serializer &serializer) const;
 	static HiveCSVOptions Deserialize(Deserializer &deserializer);
 };

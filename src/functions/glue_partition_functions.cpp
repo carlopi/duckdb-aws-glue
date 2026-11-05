@@ -21,18 +21,6 @@ namespace duckdb {
 
 namespace {
 
-//===--------------------------------------------------------------------===//
-// Shared: resolving the table and the partition spec
-//===--------------------------------------------------------------------===//
-struct GluePartitionTarget {
-	GlueCatalog *catalog = nullptr;
-	GlueTableInfo table;
-
-	string TableName() const {
-		return table.schema_name + "." + table.name;
-	}
-};
-
 void ThrowIsView(const string &function_name, const string &table_name, bool require_partitions) {
 	if (require_partitions) {
 		throw BinderException("%s: Glue view '%s' has no partitions", function_name, table_name);
@@ -40,8 +28,10 @@ void ThrowIsView(const string &function_name, const string &table_name, bool req
 	throw BinderException("%s: '%s' is a Glue view, not a table", function_name, table_name);
 }
 
+} // namespace
+
 GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &function_name, const Value &table_name,
-                                     bool require_partitions = true) {
+                                     bool require_partitions) {
 	auto name = ResolveGlueTableName(context, function_name, table_name.GetValue<string>());
 	GluePartitionTarget result;
 	result.catalog = &Catalog::GetCatalog(context, name.Catalog()).Cast<GlueCatalog>();
@@ -63,6 +53,17 @@ GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &funct
 	}
 	return result;
 }
+
+Value PartitionListingValue(ClientContext &context, const string &key, const string &str_value,
+                            const LogicalType &type) {
+	try {
+		return GlueTypes::PartitionValue(context, key, str_value, type);
+	} catch (std::exception &) {
+		return Value(type);
+	}
+}
+
+namespace {
 
 //! Turn a partition spec {key: value, ...} into the partition values (as strings) in partition key order. The spec
 //! must name every partition key and nothing else.
@@ -178,18 +179,6 @@ string DefaultPartitionLocation(const GluePartitionTarget &target, const vector<
 		}
 	}
 	return location;
-}
-
-//! GlueTypes::PartitionValue, but a partition value that can't be cast to the key's type is NULL instead of throwing,
-//! so one bad partition doesn't make the whole glue_partitions() listing fail (e.g. 'abc' for an INT key lists as
-//! NULL).
-static Value PartitionListingValue(ClientContext &context, const string &key, const string &str_value,
-                                   const LogicalType &type) {
-	try {
-		return GlueTypes::PartitionValue(context, key, str_value, type);
-	} catch (std::exception &) {
-		return Value(type);
-	}
 }
 
 //! Bind data for the functions that change one partition and report one row when executed
@@ -1041,7 +1030,7 @@ void GlueGetPartitionResponseScan(ClientContext &context, TableFunctionInput &da
 	output.data[2].Append(Value::LIST(LogicalType::VARCHAR, std::move(values)));
 	output.data[3].Append(Value(partition.location));
 	output.data[4].Append(Value(partition.serde_library));
-	output.data[5].Append(GlueColumnsToValue(partition.columns));
+	output.data[5].Append(GlueColumnsToValue(partition.partition_columns));
 	output.data[6].Append(GlueParametersToValue(partition.parameters));
 	output.data[7].Append(GlueParametersToValue(partition.serde_parameters));
 
