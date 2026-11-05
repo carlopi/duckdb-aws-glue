@@ -15,7 +15,7 @@ GlueTransaction::GlueTransaction(GlueCatalog &glue_catalog, TransactionManager &
     : Transaction(manager, context), glue_catalog(glue_catalog),
       transaction_state(GlueTransactionState::TRANSACTION_NOT_YET_STARTED) {
 	if (GlueTransactionCache::ConnectionScoped(context)) {
-		auto state = context.registered_state->GetOrCreate<GlueMetadataCacheState>("glue_metadata_cache");
+		auto state = context.Services().GetRegisteredState().GetOrCreate<GlueMetadataCacheState>("glue_metadata_cache");
 		cache = state->GetCache(glue_catalog.GetName().GetIdentifierName(), glue_catalog.GetAttached().oid);
 	} else {
 		cache = make_shared_ptr<GlueTransactionCache>();
@@ -39,6 +39,27 @@ void GlueTransaction::Rollback() {
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
 		transaction_state = GlueTransactionState::TRANSACTION_FINISHED;
 	}
+	// Rolled back: drop every table created in this transaction. A failed drop is logged (with the table
+	// name, so it can be dropped manually).
+	auto client_context = context.lock();
+	for (auto &created : created_tables) {
+		try {
+			GlueAPI::DropCreatedTable(created.client, created.catalog_id, created.database_name, created.table_name);
+		} catch (std::exception &ex) {
+			if (client_context) {
+				ErrorData error(ex);
+				DUCKDB_LOG_WARNING(*client_context,
+				                   "Table cleanup: could not drop Glue table '%s.%s' after rollback: %s",
+				                   created.database_name, created.table_name, error.RawMessage());
+			}
+		}
+	}
+}
+
+void GlueTransaction::AddCreatedTable(std::shared_ptr<Aws::Glue::GlueClient> client, string catalog_id,
+                                      string database_name, string table_name) {
+	created_tables.push_back(
+	    CreatedTable {std::move(client), std::move(catalog_id), std::move(database_name), std::move(table_name)});
 }
 
 GlueTransaction &GlueTransaction::Get(ClientContext &context, Catalog &catalog) {
@@ -64,7 +85,7 @@ void GlueTransactionCache::Invalidate(ClientContext &context, Catalog &catalog) 
 	// The scope setting can change between statements, so the active transaction's cache may not be the
 	// connection-level one this write would otherwise leave stale: clear those too (all of them, matching
 	// the rollback hook — a write through any alias of the same Glue catalog must not be hidden by another's cache)
-	auto state = context.registered_state->Get<GlueMetadataCacheState>("glue_metadata_cache");
+	auto state = context.Services().GetRegisteredState().Get<GlueMetadataCacheState>("glue_metadata_cache");
 	if (state) {
 		state->ClearAll();
 	}
@@ -81,7 +102,7 @@ bool GlueTransactionCache::ConnectionScoped(ClientContext &context) {
 }
 
 void GlueTransactionCache::OnDetach(ClientContext &context, Catalog &catalog) {
-	auto state = context.registered_state->Get<GlueMetadataCacheState>("glue_metadata_cache");
+	auto state = context.Services().GetRegisteredState().Get<GlueMetadataCacheState>("glue_metadata_cache");
 	if (state) {
 		state->EraseCache(catalog.GetName().GetIdentifierName(), catalog.GetAttached().oid);
 	}

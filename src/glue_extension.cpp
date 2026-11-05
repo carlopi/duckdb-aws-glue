@@ -8,9 +8,13 @@
 #include "duckdb/storage/storage_extension.hpp"
 
 #include "catalog/glue_attach.hpp"
+#include "core/readers/hive_csv_options.hpp"
 #include "functions/glue_functions.hpp"
+#include "functions/glue_repair_table.hpp"
 #include "grammar/glue_grammar.hpp"
+#include "api/glue_api.hpp"
 #include "api/glue_http_client.hpp"
+#include "core/glue_log_types.hpp"
 #include "duckdb/main/extension_helper.hpp"
 
 #include <aws/core/Aws.h>
@@ -60,18 +64,26 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "ENDPOINT. At most 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
+	config.AddExtensionOption("glue_max_retries",
+	                          "Set a custom retry limit for AWS SDK Glue API calls: the number of retries after the "
+	                          "first attempt fails, 0 meaning no retries (single attempt), at most 10. -1, the "
+	                          "default, leaves the SDK's own retry policy in place.",
+	                          LogicalType::BIGINT, Value::BIGINT(-1));
+
 	config.AddExtensionOption("glue_create_bucketed_tables",
 	                          "Allow CREATE TABLE ... WITH (BucketColumns = [...], NumberOfBuckets = n, SortColumns = "
 	                          "[...]) to create a bucketed (clustered) Hive table. DuckDB reads such a table but does "
 	                          "not write one: INSERT into it and CREATE TABLE ... AS with these options are refused. "
 	                          "Default false.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
-	config.AddExtensionOption(
-	    "experimental_glue_view_enable_external_catalogs",
-	    "Allow Glue views over tables of other kinds of catalogs, stored by the catalog's type and "
-	    "the alias it is attached under: a view reads only where a catalog of that type is "
-	    "attached under that alias. Default false.",
-	    LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	// global only: a view entry is shared by all sessions and reads it without a ClientContext
+	ExtensionOption external_catalog_types(
+	    "Types of non-Glue catalogs (e.g. ['duckdb', 'iceberg']) whose tables Glue views may store, by type and alias, "
+	    "and read; never catalogs in memory, temporary, system or hidden. Global only. Default empty.",
+	    LogicalType::LIST(LogicalType::VARCHAR), nullptr, Value::LIST(LogicalType::VARCHAR, vector<Value>()),
+	    SetScope::GLOBAL, false, false);
+	external_catalog_types.supports_session = false;
+	config.AddExtensionOption("experimental_glue_view_external_catalog_types", std::move(external_catalog_types));
 	config.AddExtensionOption("glue_metadata_cache_scope",
 	                          "How long resolved Glue metadata (tables, partitions) is reused: 'transaction' (default) "
 	                          "re-resolves per transaction, so writes from other sessions become visible between "
@@ -98,9 +110,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    LogicalType::BOOLEAN, Value::BOOLEAN(false));
 
 	config.AddExtensionOption("hive_partition_listing_threshold",
-	                          "When a scan reads at least this many partitions below the table location, the location "
-	                          "is listed once (recursively) instead of one listing per partition. Default 10.",
-	                          LogicalType::UBIGINT, Value::UBIGINT(10));
+	                          "When set, a scan reading at least this many partitions below the table location lists "
+	                          "the location once (recursively) instead of one listing per partition. Unset (default), "
+	                          "the location is listed when that takes fewer rounds of requests than listing the "
+	                          "partitions read, or as many rounds and a tenth of the requests.",
+	                          LogicalType::UBIGINT, Value(LogicalType::UBIGINT));
 
 	config.AddExtensionOption("hive_csv_parallel",
 	                          "Read each file of an OpenCSVSerde table with several threads when a scan has at most "
@@ -109,9 +123,25 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "with the NULL padding of short rows. Default true.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
+	config.AddExtensionOption("hive_csv_max_line_size",
+	                          "The longest line, in bytes, a scan of a csv table reads; a longer line fails the query. "
+	                          "Hive reads a line of any length. Up to 8000000 the reader's buffers and how a file is "
+	                          "split between threads are unchanged; a larger limit makes each thread read at least "
+	                          "this many bytes. Default 8000000.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(HIVE_CSV_DEFAULT_MAX_LINE_SIZE));
+
+	config.AddExtensionOption(
+	    "glue_debug_fail_partition_registration",
+	    "For tests: '<Glue error code>:<n>' makes the n-th partition a write registers in Glue, "
+	    "and every later one, fail with that error code; a transient error (ThrottlingException, "
+	    "InternalServiceException, ...) fails the first attempt only. Empty, the default, injects "
+	    "nothing.",
+	    LogicalType::VARCHAR, Value(""), GlueAPI::CheckDebugFailPartitionRegistration, SetScope::SESSION, true);
+
 	// The HTTP client factory has to be in place before the first AWS client is constructed
 	InitAWSAPI();
 	RegisterGlueHttpClientFactory();
+	RegisterGlueLogTypes(instance);
 
 	// Hive tables are read with read_parquet
 	ExtensionHelper::AutoLoadExtension(instance, "parquet");
@@ -132,6 +162,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetGlueSetTableLocationFunction());
 	loader.RegisterFunction(GetGlueReplaceColumnsFunction());
 	loader.RegisterFunction(GetGlueAlterTableFunction());
+	loader.RegisterFunction(GetGlueRepairTableFunction());
+	loader.RegisterFunction(*GetGlueRequestsMacro());
 	// ALTER TABLE ... ADD / DROP PARTITION etc., switched on with SET active_grammar_extensions = ['glue_hive_ddl']
 	RegisterGlueGrammarExtension(instance);
 	loader.RegisterFunction(GetHiveScanFunction(instance));

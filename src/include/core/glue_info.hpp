@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/enums/file_compression_type.hpp"
+#include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/vector.hpp"
@@ -11,6 +12,11 @@
 #include "core/readers/hive_json_options.hpp"
 
 namespace duckdb {
+
+//! A table / partition as the Glue SDK returned it, kept with the projection so that a write can be built from it
+//! instead of fetching the object again. Opaque outside api/, which alone defines them.
+struct GlueFetchedTable;
+struct GlueFetchedPartition;
 
 enum class GlueSortOrder : uint8_t { UNSORTED, ASCENDING, DESCENDING };
 
@@ -61,7 +67,10 @@ GlueTableType GlueTableTypeFromString(const string &type);
 //! A Glue "Table"
 struct GlueTableInfo {
 	string name;
-	string database_name;
+	//! The schema name of the table in the attached Glue catalog
+	string schema_name;
+	//! Table.DatabaseName as Glue returned it: through a resource link, the link's target database
+	string glue_database_name;
 	//! The Glue TableType as written (EXTERNAL_TABLE, VIRTUAL_VIEW, ...), not the open table format
 	string glue_table_type;
 	GlueTableType table_type = GlueTableType::OTHER;
@@ -87,8 +96,14 @@ struct GlueTableInfo {
 	//! StorageDescriptor.SortColumns, in Glue's order; only name and sort_order are set
 	vector<GlueColumn> sort_columns;
 	unordered_map<string, string> parameters;
+	//! Glue's VersionId and CreateTime of a fetched table; a DROP + CREATE starts at the same version again, CreateTime
+	//! (and TableType, within one second) tells the two apart. Empty for a definition not fetched from Glue.
+	string version_id;
+	int64_t create_time_ms = 0;
 	//! The file format to create the table with (CreateHiveTable); for a fetched table use GetFileFormat()
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
+	//! The Table object this projection was made from; null for a definition not fetched from Glue
+	shared_ptr<const GlueFetchedTable> fetched;
 
 public:
 	bool IsView() const {
@@ -96,6 +111,8 @@ public:
 	}
 	//! The table format and what it was derived from (GlueTableFormat::Detect)
 	GlueTableFormat GetFormat() const;
+	//! Whether 'other' is the same Glue version of the table; false when either version is unknown
+	bool IsSameVersion(const GlueTableInfo &other) const;
 	//! The 'metadata_location' parameter of an Iceberg table (empty if not present)
 	string GetMetadataLocation() const;
 	//! Look up a table parameter (case-insensitive key), returns empty string if missing
@@ -156,9 +173,10 @@ struct GlueViewInfo {
 	string sql;
 	//! ViewExpandedText: tables as <db>.<table>, of other Glue catalogs by catalog id (executed)
 	string expanded_sql;
-	//! The bound output columns; empty for a view created with DEFER_BINDING
+	//! The bound output columns
 	vector<GlueColumn> columns;
 	bool secure = false;
+	bool has_column_alias_list = false;
 };
 
 //! A partition of a Hive table to register: the partition values (in partition key order) and its location
@@ -172,14 +190,20 @@ struct GluePartitionInput {
 struct GluePartitionInfo {
 	vector<string> values;
 	string location;
-};
-
-//! A partition as GetPartition returns it: also its storage descriptor and parameters
-struct GluePartitionDetails : public GluePartitionInfo {
+	//! The partition's own StorageDescriptor.InputFormat and SerdeInfo, which Hive reads its files with and which can
+	//! differ from the table's; empty when not known (a hive_scan, a deserialized plan)
+	string input_format;
 	string serde_library;
 	unordered_map<string, string> serde_parameters;
-	vector<GlueColumn> columns;
+	//! The data columns the partition declares, which can differ from the table's; empty when not known
+	vector<GlueColumn> partition_columns;
+};
+
+//! A partition as GetPartition returns it: also its parameters
+struct GluePartitionDetails : public GluePartitionInfo {
 	unordered_map<string, string> parameters;
+	//! The Partition object this projection was made from
+	shared_ptr<const GlueFetchedPartition> fetched;
 };
 
 } // namespace duckdb

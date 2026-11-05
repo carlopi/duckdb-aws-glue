@@ -48,6 +48,13 @@ install(
   LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
 
+# The C++ tests (make test-cpp); they need cmake_language(DEFER)
+if(BUILD_UNITTESTS
+   AND NOT EMSCRIPTEN
+   AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.19)
+  add_subdirectory(test/unittest)
+endif()
+
 # The GlueFileCredentialsCallback the tests under test/sql/file_credentials load
 # with 'require glue_test_credentials'. Test-only, so linked into unittest
 # alone, the way DuckDB links debug_fs; it must share a binary with this

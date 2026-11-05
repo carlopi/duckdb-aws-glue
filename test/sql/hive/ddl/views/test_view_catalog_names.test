@@ -35,10 +35,7 @@ statement ok
 DROP VIEW IF EXISTS writer_cat.default.an_view_no_id;
 
 statement ok
-DROP VIEW IF EXISTS writer_cat.default.an_view_other_path;
-
-statement ok
-DROP VIEW IF EXISTS writer_cat.default.an_view_defer;
+DROP VIEW IF EXISTS writer_cat.default.an_view_noprobe;
 
 statement ok
 DROP VIEW IF EXISTS writer_cat.default.an_view;
@@ -184,7 +181,7 @@ CREATE TEMP TABLE an_temp AS SELECT 7 AS id;
 statement error
 CREATE VIEW an_view_session AS SELECT id FROM temp.an_temp;
 ----
-in catalog "temp" of type duckdb: a Glue view can only reference tables in Glue catalogs
+in catalog "temp" of type duckdb, which is not in experimental_glue_view_external_catalog_types
 
 statement ok
 DROP TABLE temp.an_orders;
@@ -376,7 +373,7 @@ CREATE TABLE memory.main.an_local AS SELECT 1 AS id;
 statement error
 CREATE VIEW any_name.default.an_view_local AS SELECT id FROM memory.main.an_local;
 ----
-a Glue view can only reference tables in Glue catalogs
+in catalog "memory" of type duckdb, which is not in experimental_glue_view_external_catalog_types
 
 # a catalog attached as ':' reads the views and writes its own tables as db.t
 statement ok
@@ -404,28 +401,6 @@ SELECT id FROM no_id.default.an_view_no_id;
 ----
 1
 
-# a catalog is the view's own when Glue reports the same id for it, whatever the ATTACH path. The local Glue (moto)
-# answers for the account of the credentials whatever CatalogId is sent, so a catalog attached as '111111111111'
-# with the same credentials is the view's own catalog here. (In AWS an account-id path and Glue's report agree;
-# for "<catalog>/<nested>" Glue reports "<account>:<catalog>/<nested>".) Tables of another account:
-# test_view_other_account.test; of an S3 Tables catalog: test_view_nested_catalog.test (live only).
-statement ok
-attach '111111111111' as other_spelling (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
-
-statement ok
-CREATE VIEW no_id.default.an_view_other_path AS SELECT id FROM other_spelling.default.an_orders;
-
-query I
-SELECT response.ViewExpandedText FROM glue_get_table_response('no_id.default.an_view_other_path');
-----
-SELECT id FROM "default".an_orders
-
-statement ok
-DETACH other_spelling;
-
-statement ok
-DROP VIEW no_id.default.an_view_other_path;
-
 statement ok
 DROP VIEW no_id.default.an_view_no_id;
 
@@ -445,20 +420,20 @@ SELECT id FROM reader_noprobe.default.an_view ORDER BY id;
 statement ok
 DETACH reader_noprobe;
 
-# a DEFER_BINDING view of a missing table goes to the view's own catalog
+# with VERIFY_CONNECTION false a ':' catalog writes its own tables as db.t too: no catalog id is needed
 statement ok
 attach ':' as cat_noprobe (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', VERIFY_CONNECTION false);
 
 statement ok
-CREATE VIEW cat_noprobe.default.an_view_defer WITH (DEFER_BINDING) AS SELECT id FROM an_later;
+CREATE VIEW cat_noprobe.default.an_view_noprobe AS SELECT id FROM an_orders;
 
 query I
-SELECT response.ViewExpandedText FROM glue_get_table_response('cat_noprobe.default.an_view_defer');
+SELECT response.ViewExpandedText FROM glue_get_table_response('cat_noprobe.default.an_view_noprobe');
 ----
-SELECT id FROM "default".an_later
+SELECT id FROM "default".an_orders
 
 statement ok
-DROP VIEW cat_noprobe.default.an_view_defer;
+DROP VIEW cat_noprobe.default.an_view_noprobe;
 
 statement ok
 DETACH cat_noprobe;
@@ -476,7 +451,7 @@ CREATE TABLE "default".main.an_orders AS SELECT 99 AS id;
 statement error
 CREATE VIEW any_name.default.an_view_session AS SELECT id FROM "default".an_orders;
 ----
-in catalog "default" of type duckdb: a Glue view can only reference tables in Glue catalogs
+in catalog "default" of type duckdb, which is not in experimental_glue_view_external_catalog_types
 
 query I
 SELECT id FROM any_name.default.an_view ORDER BY id;

@@ -59,14 +59,14 @@ private:
 } // namespace
 
 void ClearHiveListingCache(ClientContext &context) {
-	auto cache = context.registered_state->Get<HiveListingCache>(HIVE_LISTING_CACHE);
+	auto cache = context.Services().GetRegisteredState().Get<HiveListingCache>(HIVE_LISTING_CACHE);
 	if (cache) {
 		cache->Clear();
 	}
 }
 
 shared_ptr<HiveQueryCache> HiveQueryCache::Get(ClientContext &context) {
-	return context.registered_state->GetOrCreate<HiveQueryCache>(HIVE_QUERY_CACHE);
+	return context.Services().GetRegisteredState().GetOrCreate<HiveQueryCache>(HIVE_QUERY_CACHE);
 }
 
 string HiveQueryCache::TableKey(const string &catalog, const string &database, const string &table) {
@@ -78,6 +78,12 @@ void HiveQueryCache::QueryEnd(ClientContext &context) {
 	glue_tables.clear();
 	samples.clear();
 	directory_listings.clear();
+	scan_count = 0;
+}
+
+idx_t HiveQueryCache::NextScanId() {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	return ++scan_count;
 }
 
 shared_ptr<GlueTableEntry> HiveQueryCache::GetGlueTable(const string &key) {
@@ -99,23 +105,33 @@ shared_ptr<HiveTableSampleEntry> HiveQueryCache::GetSample(const string &table) 
 }
 
 shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &context, const string &directory,
-                                                              bool cache_in_connection, const string &file_secret) {
+                                                              bool cache_in_connection) {
 	auto key = directory;
 	StringUtil::RTrim(key, "/");
-	if (cache_in_connection && file_secret.empty()) {
+	if (cache_in_connection) {
 		// the connection's listings (glue_cache_listings): kept for later statements, cleared with the metadata cache
-		return context.registered_state->GetOrCreate<HiveListingCache>(HIVE_LISTING_CACHE)->GetListing(context, key);
+		return context.Services()
+		    .GetRegisteredState()
+		    .GetOrCreate<HiveListingCache>(HIVE_LISTING_CACHE)
+		    ->GetListing(context, key);
 	}
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	// the files of a listing carry its file secret, so only reads with the same file secret share it
-	auto &listing = directory_listings[file_secret.empty() ? key : key + '\0' + file_secret];
-	if (!listing) {
-		FileGlobInput input(FileGlobOptions::ALLOW_EMPTY);
-		input.file_secret = file_secret;
+	shared_ptr<HiveDirectoryListingEntry> entry;
+	{
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		auto &slot = directory_listings[key];
+		if (!slot) {
+			slot = make_shared_ptr<HiveDirectoryListingEntry>();
+		}
+		entry = slot;
+	}
+	// lock per directory: GlobFileList fetches the first page right away, and listings of other directories must not
+	// wait behind it
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	if (!entry->listing) {
 		auto &fs = FileSystem::GetFileSystem(context);
-		listing = shared_ptr<MultiFileList>(fs.GlobFileList(key + "/**", input));
+		entry->listing = shared_ptr<MultiFileList>(fs.GlobFileList(key + "/**", FileGlobOptions::ALLOW_EMPTY));
 	}
-	return listing;
+	return entry->listing;
 }
 
 shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info) {

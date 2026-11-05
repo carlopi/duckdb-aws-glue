@@ -1,6 +1,7 @@
 #include "catalog/glue_catalog.hpp"
 
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
+#include "duckdb/catalog/schema_scan_filters.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/attached_database.hpp"
@@ -23,6 +24,7 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
+#include "catalog/scan_filter_equality.hpp"
 #include "planning/glue_hive_insert.hpp"
 
 namespace duckdb {
@@ -102,6 +104,19 @@ GlueSchemaSet &GlueCatalog::GetSchemas() {
 	return schemas;
 }
 
+static optional_ptr<CatalogEntry> OnExistingSchema(const CreateSchemaInfo &info, const string &schema_name,
+                                                   const string &catalog_name) {
+	switch (info.on_conflict) {
+	case OnCreateConflict::IGNORE_ON_CONFLICT:
+		return nullptr;
+	case OnCreateConflict::ERROR_ON_CONFLICT:
+		throw CatalogException("Schema with name \"%s\" already exists in Glue catalog \"%s\"", schema_name,
+		                       catalog_name);
+	default:
+		throw NotImplementedException("CREATE OR REPLACE SCHEMA is not supported for Glue catalogs");
+	}
+}
+
 optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
 	auto &context = transaction.GetContext();
 	ThrowIfInExplicitTransaction(context);
@@ -109,15 +124,7 @@ optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transact
 
 	auto existing = schemas.GetEntry(context, schema_name);
 	if (existing) {
-		switch (info.on_conflict) {
-		case OnCreateConflict::IGNORE_ON_CONFLICT:
-			return nullptr;
-		case OnCreateConflict::ERROR_ON_CONFLICT:
-			throw CatalogException("Schema with name \"%s\" already exists in Glue catalog \"%s\"", schema_name,
-			                       GetName().GetIdentifierName());
-		default:
-			throw NotImplementedException("CREATE OR REPLACE SCHEMA is not supported for Glue catalogs");
-		}
+		return OnExistingSchema(info, schema_name, GetName().GetIdentifierName());
 	}
 
 	GlueDatabaseInfo database;
@@ -126,7 +133,13 @@ optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transact
 	for (auto &option : GlueSchemaEntry::EvaluateOptions(context, info.options, "CREATE SCHEMA")) {
 		SetDatabaseOption(database, option.first, option.second);
 	}
-	GlueAPI::CreateDatabase(context, *this, database);
+	if (GlueAPI::CreateDatabase(context, *this, database) == GlueCreateOutcome::ALREADY_EXISTED) {
+		// another client created the database since the lookup above: take its entry
+		if (!schemas.GetEntry(context, schema_name)) {
+			throw CatalogException("Glue database \"%s\" exists but could not be fetched", schema_name);
+		}
+		return OnExistingSchema(info, schema_name, GetName().GetIdentifierName());
+	}
 
 	// re-fetch so the cached entry reflects what Glue stored
 	GlueDatabaseInfo created;
@@ -192,7 +205,7 @@ void GlueCatalog::SetDatabaseOption(GlueDatabaseInfo &database, const string &ke
 void GlueCatalog::AlterSchema(CatalogTransaction transaction, SchemaCatalogEntry &schema, AlterSchemaInfo &info) {
 	auto &context = transaction.GetContext();
 	ThrowIfInExplicitTransaction(context);
-	auto schema_name = schema.Cast<GlueSchemaEntry>().database_info.name;
+	auto schema_name = schema.Cast<GlueSchemaEntry>().GetDatabaseName();
 	// work on the current Glue definition, not the cached one
 	GlueDatabaseInfo database;
 	if (!GlueAPI::GetDatabase(context, *this, schema_name, database)) {
@@ -262,6 +275,21 @@ void GlueCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaC
 	schemas.Scan(context, [&](CatalogEntry &schema) { callback(schema.Cast<GlueSchemaEntry>()); });
 }
 
+vector<reference<SchemaCatalogEntry>> GlueCatalog::GetSchemasForScan(ClientContext &context,
+                                                                     const SchemaScanFilters &filters) {
+	string name;
+	if (filters.GetSchemaOid() ||
+	    !TryGetNameEquality(filters.GetSchemaName(), "GlueCatalog::GetSchemasForScan", name)) {
+		return Catalog::GetSchemasForScan(context, filters);
+	}
+	vector<reference<SchemaCatalogEntry>> result;
+	auto entry = schemas.GetEntry(context, name);
+	if (entry) {
+		result.push_back(entry->Cast<SchemaCatalogEntry>());
+	}
+	return result;
+}
+
 optional_ptr<SchemaCatalogEntry> GlueCatalog::LookupSchema(CatalogTransaction transaction,
                                                            const EntryLookupInfo &schema_lookup,
                                                            OnEntryNotFound if_not_found) {
@@ -294,6 +322,68 @@ optional_ptr<SchemaCatalogEntry> GlueCatalog::LookupSchema(CatalogTransaction tr
 		                       schema_name);
 	}
 	return &entry->Cast<SchemaCatalogEntry>();
+}
+
+CatalogEntryLookup GlueCatalog::TryLookupEntryInternal(CatalogTransaction transaction,
+                                                       const EntryLookupInfo &lookup_info) {
+	if (lookup_info.GetAtClause() && !SupportsTimeTravel()) {
+		return {nullptr, nullptr, ErrorData(BinderException("Catalog type does not support time travel"))};
+	}
+	CatalogEntryLookup result {nullptr, nullptr, ErrorData()};
+	auto &catalog = lookup_info.GetCatalog();
+	auto &database_name = lookup_info.GetSchema().GetIdentifierName();
+	// Glue databases are not nested: "x".db.t with an unknown catalog x arrives as [x, db, t]
+	if (lookup_info.GetQualifiedName().Path().size() > 3 || database_name.empty() ||
+	    (!catalog.empty() && !StringUtil::CIEquals(catalog.GetIdentifierName(), GetName().GetIdentifierName()))) {
+		return result;
+	}
+	if (lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY) {
+		switch (TryLookupTableBeforeSchema(transaction, lookup_info, database_name, result)) {
+		case TableLookup::TABLE_FOUND:
+		case TableLookup::TABLE_NOT_FOUND:
+		case TableLookup::SCHEMA_NOT_FOUND:
+			// 'result' holds the table and its schema, the schema alone, or neither
+			return result;
+		case TableLookup::SKIPPED:
+			break;
+		}
+	}
+	auto schema = schemas.GetEntry(transaction.GetContext(), database_name);
+	if (schema) {
+		result.schema = &schema->Cast<SchemaCatalogEntry>();
+		result.entry = result.schema->LookupEntry(transaction, lookup_info);
+	}
+	return result;
+}
+
+TableLookup GlueCatalog::TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
+                                                    const string &database_name, CatalogEntryLookup &result) {
+	// Glue keeps database names in lower case, as GetDatabase would name the schema
+	GlueDatabaseInfo database;
+	database.name = StringUtil::Lower(database_name);
+	if (schemas.GetCachedEntry(database.name)) {
+		return TableLookup::SKIPPED;
+	}
+	auto schema = schemas.CreateSchemaEntry(database, false);
+	auto entry = schema->LookupEntry(transaction, lookup_info);
+	if (!entry) {
+		// the table or its schema is missing: GetDatabase tells which, without asking for the table again
+		auto loaded = schemas.GetEntry(transaction.GetContext(), database.name);
+		if (!loaded) {
+			return TableLookup::SCHEMA_NOT_FOUND;
+		}
+		result.schema = &loaded->Cast<SchemaCatalogEntry>();
+		return TableLookup::TABLE_NOT_FOUND;
+	}
+	// The set's lock is not held across the GetTable above, so another lookup can have added the schema since the
+	// GetCachedEntry check. Then that entry is kept and the regular lookup finds the table in it, from the cache.
+	auto added = schemas.AddEntryIfAbsent(std::move(schema));
+	if (!added) {
+		return TableLookup::SKIPPED;
+	}
+	result.schema = &added->Cast<SchemaCatalogEntry>();
+	result.entry = entry;
+	return TableLookup::TABLE_FOUND;
 }
 
 //! "<12-digit account>" or "<12-digit account>:..."
@@ -344,11 +434,19 @@ void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context) {
 	}
 }
 
+void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context, const char *function) {
+	if (!context.transaction.IsAutoCommit()) {
+		throw TransactionException(
+		    "%s changes Glue, which has no transactions, so it can not run inside a transaction: "
+		    "run it as a statement of its own, CALL %s(...), outside BEGIN ... COMMIT",
+		    function, function);
+	}
+}
+
 GlueTable &GlueCatalog::GetHiveTableForDML(ClientContext &context, TableCatalogEntry &table, const char *statement,
                                            GlueTableInfo &table_info) {
 	auto &glue_table = table.Cast<GlueTable>();
-	// another engine may have converted the table since the entry was cached
-	table_info = glue_table.RefreshTableInfo(context);
+	table_info = glue_table.schema.Cast<GlueSchemaEntry>().DefinitionForWrite(context, glue_table);
 	auto format = table_info.GetFormat();
 	if (!format.IsHive()) {
 		throw NotImplementedException("%s on Glue table '%s' with type %s is not supported, only Hive tables can be "
@@ -380,11 +478,11 @@ GlueTable &GlueCatalog::GetHiveTableForDML(ClientContext &context, TableCatalogE
 	}
 	// Athena writes JSON only with the Hive JsonSerDe; OpenX properties (mapping.*, dots.in.keys) would not find the
 	// keys DuckDB writes
-	if (glue_table.table_info.GetSerDe() == HiveSerDe::OPENX_JSON) {
+	if (table_info.GetSerDe() == HiveSerDe::OPENX_JSON) {
 		throw NotImplementedException("%s into Glue table '%s' is not supported: the table uses the OpenX JSON SerDe "
 		                              "'%s', DuckDB writes JSON tables only with the Hive JsonSerDe "
 		                              "(org.apache.hive.hcatalog.data.JsonSerDe)",
-		                              statement, table.name.GetIdentifierName(), glue_table.table_info.serde_library);
+		                              statement, table.name.GetIdentifierName(), table_info.serde_library);
 	}
 	return glue_table;
 }
@@ -399,7 +497,7 @@ PhysicalOperator &GlueCatalog::PlanInsert(ClientContext &context, PhysicalPlanGe
 	auto &glue_table = GetHiveTableForDML(context, op.table, "INSERT", table_info);
 	// an INSERT writes by path, without the credentials the table's scans read with
 	// TODO: support INSERT into a table with credentials, by writing its files with them
-	if (!GlueFileCredentialsCallback::Get(context, glue_table, table_info).empty()) {
+	if (GlueFileCredentialsCallback::Has(context, glue_table, table_info)) {
 		throw NotImplementedException("INSERT into Glue table '%s', which is read with file credentials, is not "
 		                              "supported",
 		                              op.table.name.GetIdentifierName());

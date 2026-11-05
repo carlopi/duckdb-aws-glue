@@ -134,7 +134,7 @@ HiveSerDe GlueTableInfo::GetSerDe() const {
 	    "Hive table '%s.%s' uses SerDe '%s', only parquet (ParquetHiveSerDe), csv "
 	    "(LazySimpleSerDe, OpenCSVSerde), json (JsonSerDe) and avro (AvroSerDe) tables can be "
 	    "read and written; use glue_get_table_response() to inspect the table definition",
-	    database_name, name, serde_library);
+	    schema_name, name, serde_library);
 }
 
 HiveFileFormat GlueTableInfo::GetFileFormat() const {
@@ -160,8 +160,8 @@ string GlueTableInfo::GetOpenCSVCharacter(const string &key, const string &fallb
 	}
 	string character;
 	if (!TryFirstCharacter(value, character)) {
-		throw InvalidInputException("Hive table '%s.%s' has an invalid '%s' of '%s', expected text", database_name,
-		                            name, key, value);
+		throw InvalidInputException("Hive table '%s.%s' has an invalid '%s' of '%s', expected text", schema_name, name,
+		                            key, value);
 	}
 	return character;
 }
@@ -177,7 +177,7 @@ static string LazySimpleSeparator(const GlueTableInfo &table, const string &valu
 	if (separator == 0 || separator == '\n' || separator == '\r' || separator >= 0x80) {
 		throw NotImplementedException("Hive table '%s.%s' has the field delimiter '%s', a byte DuckDB can not split "
 		                              "fields on; only ASCII delimiters other than NUL and line breaks are supported",
-		                              table.database_name, table.name, value);
+		                              table.schema_name, table.name, value);
 	}
 	return string(1, static_cast<char>(separator));
 }
@@ -209,7 +209,7 @@ idx_t GlueTableInfo::GetCountProperty(const string &key) const {
 	int64_t count;
 	if (!TryParseInteger(value, 0, NumericLimits<int32_t>::Maximum(), count)) {
 		throw InvalidInputException("Hive table '%s.%s' has an invalid '%s' of '%s', expected a non-negative number",
-		                            database_name, name, key, value);
+		                            schema_name, name, key, value);
 	}
 	return NumericCast<idx_t>(count);
 }
@@ -221,7 +221,7 @@ idx_t GlueTableInfo::GetHeaderLineCount() const {
 void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
 	D_ASSERT(IsTextFileFormat(format));
 	auto refuse = [&](const string &what) {
-		throw NotImplementedException("Hive table '%s.%s' %s, which DuckDB can not read or write", database_name, name,
+		throw NotImplementedException("Hive table '%s.%s' %s, which DuckDB can not read or write", schema_name, name,
 		                              what);
 	};
 	if (GetCountProperty("skip.footer.line.count") > 0) {
@@ -280,7 +280,7 @@ FileCompressionType GlueTableInfo::GetTextCompression() const {
 	    compression != FileCompressionType::ZSTD) {
 		throw NotImplementedException("Can not write to Hive table '%s.%s': it records %s compression, DuckDB writes "
 		                              "only gzip and zstd compressed csv and json files",
-		                              database_name, name, compression.ToString());
+		                              schema_name, name, compression.ToString());
 	}
 	return compression;
 }
@@ -299,7 +299,7 @@ string GlueTableInfo::GetCodec(HiveFileFormat format) const {
 		if (!codec.empty() && codec != "snappy" && codec != "deflate" && codec != "null") {
 			throw NotImplementedException("Can not write to Hive table '%s.%s': it records %s compression, DuckDB "
 			                              "writes only snappy and deflate compressed avro files",
-			                              database_name, name, codec);
+			                              schema_name, name, codec);
 		}
 		return codec;
 	}
@@ -338,6 +338,8 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 	options.null_for_invalid_data =
 	    GetSerDe() != HiveSerDe::OPEN_CSV || (TryGetProperty("use.null.for.invalid.data", null_for_invalid_data) &&
 	                                          StringUtil::CIEquals(null_for_invalid_data, "true"));
+	options.false_unless_true = GetSerDe() == HiveSerDe::OPEN_CSV;
+	options.epoch_fields = GetSerDe() == HiveSerDe::OPEN_CSV;
 	return options;
 }
 
@@ -358,6 +360,12 @@ GlueTableType GlueTableTypeFromString(const string &type) {
 GlueTableFormat GlueTableInfo::GetFormat() const {
 	auto &info = *this;
 	return GlueTableFormat::Detect(info);
+}
+
+bool GlueTableInfo::IsSameVersion(const GlueTableInfo &other) const {
+	// Glue's CreateTime has whole seconds: a table replaced by a view within one second keeps version and CreateTime
+	return !version_id.empty() && version_id == other.version_id && create_time_ms == other.create_time_ms &&
+	       glue_table_type == other.glue_table_type;
 }
 
 string GlueTableInfo::GetMetadataLocation() const {
