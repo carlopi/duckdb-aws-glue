@@ -6,6 +6,7 @@
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
+#include "core/hive_location.hpp"
 #include "planning/hive_multi_file_reader.hpp"
 
 #include "duckdb/common/file_system.hpp"
@@ -14,35 +15,13 @@
 
 namespace duckdb {
 
-//! A CREATE TABLE AS writes only to a location without data files: the files of a dropped table there would read as
-//! rows of the new one. Files a scan skips (_SUCCESS, directory markers, empty files) do not count; with 'overwrite'
-//! the data files are deleted instead.
-//! 'location' without a trailing slash, with s3a:// and s3n:// read as s3://, so that locations can be compared
-static string ComparableLocation(string location) {
-	StringUtil::RTrim(location, "/");
-	auto scheme_end = location.find("://");
-	if (scheme_end == string::npos) {
-		return location;
-	}
-	auto scheme = StringUtil::Lower(location.substr(0, scheme_end));
-	if (scheme == "s3a" || scheme == "s3n") {
-		scheme = "s3";
-	}
-	return scheme + location.substr(scheme_end);
-}
-
-//! Whether one location holds the other, so that files of one are files of the other
-static bool LocationsOverlap(const string &a, const string &b) {
-	return a == b || StringUtil::StartsWith(a, b + "/") || StringUtil::StartsWith(b, a + "/");
-}
-
 //! 'overwrite' deletes files that must not belong to a table: refuse when a table of the same Glue database, or a
 //! partition of one, reads them. A partition can lie outside its table's location, so the partitions of partitioned
 //! tables are listed as well. Tables in other databases, catalogs or accounts are not checked.
 static void ThrowIfLocationInUse(ClientContext &context, GlueSchemaEntry &schema, const GlueTableInfo &table_info,
                                  const string &location) {
 	auto &catalog = schema.catalog.Cast<GlueCatalog>();
-	auto &database_name = schema.database_info.name;
+	auto &database_name = schema.GetDatabaseName();
 	auto target = ComparableLocation(location);
 	auto overlaps = [&](const string &other) {
 		return !other.empty() && LocationsOverlap(target, ComparableLocation(other));
@@ -74,6 +53,9 @@ static void ThrowIfLocationInUse(ClientContext &context, GlueSchemaEntry &schema
 	}
 }
 
+//! A CREATE TABLE AS writes only to a location without data files: the files of a dropped table there would read as
+//! rows of the new one. Files a scan skips (_SUCCESS, directory markers, empty files) do not count; with 'overwrite'
+//! the data files are deleted instead.
 static void ClearLocation(ClientContext &context, GlueSchemaEntry &schema, const GlueTableInfo &table_info,
                           const string &location, bool overwrite) {
 	// the location is listed with a glob, which would miss its own files and match those of other prefixes
