@@ -181,7 +181,7 @@ CREATE TEMP TABLE an_temp AS SELECT 7 AS id;
 statement error
 CREATE VIEW an_view_session AS SELECT id FROM temp.an_temp;
 ----
-in catalog "temp" of type duckdb: a Glue view can only reference tables in Glue catalogs
+in catalog "temp" of type duckdb, which is not in experimental_glue_view_external_catalog_types
 
 statement ok
 DROP TABLE temp.an_orders;
@@ -373,7 +373,7 @@ CREATE TABLE memory.main.an_local AS SELECT 1 AS id;
 statement error
 CREATE VIEW any_name.default.an_view_local AS SELECT id FROM memory.main.an_local;
 ----
-a Glue view can only reference tables in Glue catalogs
+in catalog "memory" of type duckdb, which is not in experimental_glue_view_external_catalog_types
 
 # a catalog attached as ':' reads the views and writes its own tables as db.t
 statement ok
@@ -451,7 +451,7 @@ CREATE TABLE "default".main.an_orders AS SELECT 99 AS id;
 statement error
 CREATE VIEW any_name.default.an_view_session AS SELECT id FROM "default".an_orders;
 ----
-in catalog "default" of type duckdb: a Glue view can only reference tables in Glue catalogs
+in catalog "default" of type duckdb, which is not in experimental_glue_view_external_catalog_types
 
 query I
 SELECT id FROM any_name.default.an_view ORDER BY id;
