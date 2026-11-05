@@ -55,7 +55,9 @@ unique_ptr<GlobalSinkState> GlueHiveCopy::GetGlobalSinkState(ClientContext &cont
 				                       "TABLE IF NOT EXISTS",
 				                       table_info.name);
 			}
-			// Drop the table if this statement does not commit
+			// CreateTableFromInfo returns non-null only when this statement actually created the table (null if
+			// it already existed). Record it on the transaction only then: Rollback() drops it, Commit() keeps
+			// it. So CREATE TABLE IF NOT EXISTS on an existing table is never recorded and never dropped.
 			GlueAPI::RegisterTableCleanup(context, catalog.Cast<GlueCatalog>(), table_info.schema_name,
 			                              table_info.name);
 			table_created = true;

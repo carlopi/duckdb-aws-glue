@@ -164,6 +164,11 @@ public:
 	void Commit();
 	void Rollback();
 
+	//! Record a table created in this transaction so Rollback() drops it from Glue (Commit() keeps it). The Glue
+	//! client is captured now, while the transaction is active, because Rollback() has no context to resolve one.
+	void AddCreatedTable(std::shared_ptr<Aws::Glue::GlueClient> client, string catalog_id, string database_name,
+	                     string table_name);
+
 	static GlueTransaction &Get(ClientContext &context, Catalog &catalog);
 
 public:
@@ -173,6 +178,14 @@ public:
 	shared_ptr<GlueTransactionCache> cache;
 
 private:
+	//! A table created in this transaction, with the client captured to drop it with on rollback
+	struct CreatedTable {
+		std::shared_ptr<Aws::Glue::GlueClient> client;
+		string catalog_id;
+		string database_name;
+		string table_name;
+	};
+	vector<CreatedTable> created_tables;
 	GlueTransactionState transaction_state;
 };
 

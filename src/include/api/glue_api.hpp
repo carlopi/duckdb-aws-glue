@@ -123,10 +123,14 @@ public:
 	//! Delete a table (the data files are left in place), throws a CatalogException if it does not exist
 	static void DeleteTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                        const string &table_name);
-	//! Register cleanup for a just-created table: drop it from Glue if the statement fails instead of committing.
-	//! The Glue client is captured now, while the transaction is active, so the drop can run from the rollback hook.
+	//! Record a just-created table on the active Glue transaction so that, if the transaction rolls back instead
+	//! of committing, the table is dropped from Glue. The client is captured now, while the transaction is active.
 	static void RegisterTableCleanup(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                 const string &table_name);
+	//! Drop a table using a pre-captured client, for rollback cleanup that runs without an active transaction to
+	//! resolve a client. "Already gone" is treated as success; other failures throw a GlueException.
+	static void DropCreatedTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, const string &catalog_id,
+	                             const string &database_name, const string &table_name);
 
 private:
 	//! Get (or create) the Glue client for the catalog, using the credentials of the configured DuckDB secret
