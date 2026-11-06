@@ -47,16 +47,22 @@ Text tables are read the way their SerDe reads them:
 - LazySimpleSerDe: the delimiter is `field.delim`, else `serialization.format`, else `\001`; a number from -128 to 127
   is a byte code (`'1'` is `\001`, `'9'` a tab). NULL is `serialization.null.format`, `\N` by default. Fields are not
   quoted.
-- OpenCSVSerde: `separatorChar` (`,`), `quoteChar` (`"`) and `escapeChar` (the quote character, which reads the
-  doubled quotes Hive writes). An empty field is an empty string; there is no NULL. A line break inside a quoted field
-  fails a scan of at most twice `threads` files, which reads each file with several threads (`The parallel scanner
-  does not support null_padding in conjunction with quoted new lines`); with more files DuckDB reads one thread per
-  file and the field is read as one value, as CSV defines it. `SET hive_csv_parallel = false` reads one thread per
-  file in every scan. Hive and Athena v3 split the record at the line break first (TextInputFormat) and return two
-  broken rows, a difference this extension does not reproduce. A boolean field is true when it is `true` in any
-  case and false otherwise. A timestamp field is a number of milliseconds since the epoch (`1579059880000` is
-  `2020-01-15 03:44:40`) and a date field a number of days since the epoch (`18276` is `2020-01-15`); text such as
-  `2020-01-15 03:44:40` or `2020-01-15` does not parse.
+- OpenCSVSerde: `separatorChar` (`,`), `quoteChar` (`"`) and `escapeChar` (`\` when the table has none; doubled quotes
+  are read either way). Without `escapeChar` the escape is read as Athena v3 reads it: the `\` is dropped and the `\`
+  or quote character after it is kept, in a quoted field or not (`\` is an empty field, `a\x` is `ax`, `a\\b` is
+  `a\b`), and outside quotes it does not escape the separator (`a\,b` is the fields `a` and `b`). As `read_csv` splits
+  the fields first, two cases differ: `\"` inside a quoted field ends the quote, so the field and the following lines
+  run together until the next quote (v3: `"`), and an unquoted field starting with `\\` keeps one `\` (v3: none). An
+  `escapeChar` the table records, such as the `"` of the tables this extension creates, is applied by `read_csv` (v3
+  reads `"` as `\` too). An empty field is an empty string; there is no NULL. A line break inside a quoted field fails
+  a scan of at most twice `threads` files, which reads each file with several threads (`The parallel scanner does not
+  support null_padding in conjunction with quoted new lines`); with more files DuckDB reads one thread per file and
+  the field is read as one value, as CSV defines it. `SET hive_csv_parallel = false` reads one thread per file in
+  every scan. Hive and Athena v3 split the record at the line break first (TextInputFormat) and return two broken
+  rows, a difference this extension does not reproduce. A boolean field is true when it is `true` in any case and
+  false otherwise. A timestamp field is a number of milliseconds since the epoch (`1579059880000` is `2020-01-15
+  03:44:40`) and a date field a number of days since the epoch (`18276` is `2020-01-15`); text such as `2020-01-15
+  03:44:40` or `2020-01-15` does not parse.
 - Short rows are padded with NULL, extra fields are ignored, and a value that does not parse as its column type is
   NULL, except in OpenCSVSerde tables, where it fails the query unless `use.null.for.invalid.data` is `true`. Fields
   are converted with `TRY_CAST` (`CAST` in OpenCSVSerde tables without the property), which differs from Hive in
@@ -73,15 +79,20 @@ Text tables are read the way their SerDe reads them:
   succeeds and a warning is logged (`CALL enable_logging(level := 'warning')`).
 - JSON keys are matched to the columns ignoring (ASCII) case, as both SerDes do, at every nesting level; an OpenX table
   with `case.insensitive=false` matches them exactly. Keys of one object that differ only in case are duplicate keys.
-- Writes produce files Hive reads back unchanged: LazySimpleSerDe values are unquoted and refused if they hold the
+- Writes produce files that read back unchanged: LazySimpleSerDe values are unquoted and refused if they hold the
   delimiter or a line break, or equal the NULL string; OpenCSVSerde values are all quoted and refused if they hold a
-  line break, and timestamps and dates are written as milliseconds (truncated) and days since the epoch (an infinite
-  value is refused). NULL is written as an empty field, which reads back as an empty string in a string column,
-  false in a boolean column and NULL elsewhere only with `use.null.for.invalid.data`; otherwise reading it fails.
-- Not supported, for reads and writes: footer lines (`skip.footer.line.count`), header lines in JsonSerDe tables,
-  nested columns, multi-byte quote or escape characters, and for LazySimpleSerDe `escape.delim`, a non-UTF-8
-  `serialization.encoding`, `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the
-  NULL string. Writes need a single-byte delimiter.
+  line break; timestamps and dates are written as milliseconds (truncated) and days since the epoch (an infinite value
+  is refused), and a `\` is doubled in a table without `escapeChar`, which reads with the `\` escape. NULL is written
+  as an empty field, which reads back as an empty string in a string column, false in a boolean column and NULL
+  elsewhere only with `use.null.for.invalid.data`; otherwise reading it fails.
+- Not supported, for reads and writes: footer lines (`skip.footer.line.count`), header lines in JsonSerDe tables, nested
+  columns, multi-byte quote or escape characters, and for LazySimpleSerDe `serialization.escape.crlf`, an `escape.delim`
+  that is the delimiter or longer than one byte, a non-UTF-8 `serialization.encoding`,
+  `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the NULL string. Writes need a
+  single-byte delimiter.
+- LazySimpleSerDe with `escape.delim` (one byte): the escape character makes the next character part of the field,
+  a delimiter included (`a\,b` is `a,b`, `\\` is `\`); `\N` is still NULL. An escaped line break continues the field
+  (Hive ends the record there). Writes escape the escape character and the delimiter in each value.
 - As in Hive, a table property overrides the SerDe property of the same name and keys are case-sensitive. Line counts
   and byte codes are DuckDB integer casts (`'1.5'` is 2). Partitions are read with the table's SerDe and SerDe
   properties: a scan that reaches a partition whose own InputFormat, SerDe or SerDe properties read its files
@@ -172,7 +183,9 @@ their codec themselves.
   without any of these the statement fails. Partition keys must be plain column names; they become Glue
   PartitionKeys and are listed last in the table's columns. Generated columns, column defaults and collated columns
   (`COLLATE`, also from a `CREATE TABLE ... AS` query) are refused. Unknown `WITH` keys are stored as Glue table
-  parameters. Column types are stored as Hive types; DuckDB types without one are refused, e.g. `UBIGINT`, `HUGEINT` and
+  parameters, except other engines' spellings of options this extension spells differently, which would do nothing
+  there: `partitioned_by` and `partitioning` (use `PARTITIONED BY (...)`), `external_location` (use `location`) and
+  `field_delimiter` (use `delimiter`) are refused. Column types are stored as Hive types; DuckDB types without one are refused, e.g. `UBIGINT`, `HUGEINT` and
   `TIMESTAMP_NS`/`_MS`/`_S` (Hive's `timestamp` is `TIMESTAMP`, in microseconds).
   For csv, `delimiter = '|'` sets the field delimiter (`field.delim`), `header = true` makes every file start with a
   header line (`skip.header.line.count`), and `quote = '"'` / `escape = '\'` switch the table to OpenCSVSerde with
@@ -275,11 +288,10 @@ this connection's cache: a write through it, a rollback, or DETACH.
 - A column in the SELECT can not start with the name of another catalog the view reads (`cat.db.t.col`,
   `* EXCLUDE (cat.db.t.col)`), or with its own catalog's name as a row reference (`cat.t`), even when that name is a
   table, alias or column: use a table alias with another name.
-- With `SET experimental_glue_view_enable_external_catalogs = true`, a view can also read tables of other kinds of
-  catalogs (e.g. Iceberg, Postgres, a DuckDB file). Such a table is stored as `"external:<type>:<alias>".<schema>.<table>`,
-  with the alias the catalog was attached under, so the view is tied to that alias: it reads wherever a catalog of that
-  type is attached under that alias, whichever catalog that is, and fails where none is. Reading needs no setting.
-  Catalogs in memory are refused.
+- With `SET experimental_glue_view_external_catalog_types = ['duckdb', 'iceberg']` (empty by default; global only, so
+  it applies to every connection and `SET SESSION` is refused), views can also read tables of catalogs of those types, stored as `"external:<type>:<alias>".<schema>.<table>` and read wherever a
+  catalog of that type is attached under that alias, never from one in memory, temporary, system or attached hidden. A
+  bare table name in a body written to Glue by other means is read from the view's own Glue database.
 - `SHOW [ALL] TABLES`, `duckdb_views()`, `information_schema.views` and `duckdb_columns()` list every view of a database,
   including views written by other engines. Only views written by DuckDB can be queried, replaced or dropped.
 - `DROP VIEW [IF EXISTS] db.v` deletes the view.
@@ -324,7 +336,8 @@ of a Glue table or of a `hive_scan()` call, using only core DuckDB types:
   `hive_partitioning := false`. A column of a SerDe text table is the field read as text and converted with `TRY_CAST`
   (`CAST` without `use.null.for.invalid.data` in an OpenCSVSerde table, `lower(field) = 'true'` for an OpenCSVSerde
   boolean), of the field wrapped in `__internal_barrier`, so the caller's optimizer does not push the conversion into
-  `read_csv`, which would convert the text itself and strictly.
+  `read_csv`, which would convert the text itself and strictly. A field of an OpenCSVSerde table without
+  `escapeChar` that holds a `\` is first passed through `regexp_replace`, which drops the escape.
 - `HiveScanGetFilePartitionValues(get, path)`: the values of the partition a listed file belongs to, as constants of
   the partition columns' types. The path is the file's as the scan listed it, or another spelling of it that DuckDB's
   `Path` normalizes to it (`s3://b//x` or `s3://b/./x` for `s3://b/x`).

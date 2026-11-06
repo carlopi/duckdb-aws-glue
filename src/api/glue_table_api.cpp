@@ -4,6 +4,7 @@
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/logging/logger.hpp"
+#include "duckdb/main/client_context.hpp"
 
 #include <aws/core/utils/json/JsonSerializer.h>
 #include <aws/glue/model/CreateTableRequest.h>
@@ -448,6 +449,29 @@ void GlueAPI::DeleteTable(ClientContext &context, GlueCatalog &catalog, const st
 		}
 		ThrowGlueError(outcome, StringUtil::Format("DeleteTable '%s.%s'", database_name, table_name));
 	}
+}
+
+void GlueAPI::DropCreatedTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, const string &catalog_id,
+                               const string &database_name, const string &table_name) {
+	Aws::Glue::Model::DeleteTableRequest request;
+	if (!catalog_id.empty()) {
+		request.SetCatalogId(catalog_id);
+	}
+	request.SetDatabaseName(database_name);
+	request.SetName(table_name);
+	auto outcome = client->DeleteTable(request);
+	if (!outcome.IsSuccess() && !IsEntityNotFound(outcome)) {
+		ThrowGlueError(outcome, StringUtil::Format("DeleteTable '%s.%s'", database_name, table_name));
+	}
+}
+
+void GlueAPI::RegisterTableCleanup(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                   const string &table_name) {
+	// Capture the client now (while the transaction is active) and hand the table to the catalog's transaction;
+	// its Rollback() drops the table with this client, its Commit() keeps it.
+	auto client = GetClient(context, catalog);
+	GlueTransaction::Get(context, catalog)
+	    .AddCreatedTable(std::move(client), catalog.options.catalog_id, database_name, table_name);
 }
 
 } // namespace duckdb
