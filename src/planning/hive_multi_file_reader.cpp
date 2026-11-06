@@ -490,12 +490,16 @@ void HiveMultiFileList::ThrowIfLocationShared(idx_t owner, const unordered_set<i
 		return;
 	}
 	auto partitions = scan_info->Partitions(client_context);
+	// Glue returns partitions in no fixed order (GetPartitions segments): name them in the order of their values
+	vector<idx_t> named = sharing;
+	std::sort(named.begin(), named.end(),
+	          [&](idx_t a, idx_t b) { return (*partitions)[a].values < (*partitions)[b].values; });
 	// a file would belong to one of the partitions here, while Hive engines read it once for each of them
 	throw NotImplementedException("Partitions [%s] and [%s] of Hive table '%s' are registered at the same location "
 	                              "'%s', which holds data files DuckDB can not read: register each partition at its "
 	                              "own location",
-	                              StringUtil::Join((*partitions)[sharing[0]].values, ", "),
-	                              StringUtil::Join((*partitions)[sharing[1]].values, ", "), scan_info->Describe(),
+	                              StringUtil::Join((*partitions)[named[0]].values, ", "),
+	                              StringUtil::Join((*partitions)[named[1]].values, ", "), scan_info->Describe(),
 	                              (*partitions)[owner].location);
 }
 
