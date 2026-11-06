@@ -85,10 +85,14 @@ Text tables are read the way their SerDe reads them:
   is refused), and a `\` is doubled in a table without `escapeChar`, which reads with the `\` escape. NULL is written
   as an empty field, which reads back as an empty string in a string column, false in a boolean column and NULL
   elsewhere only with `use.null.for.invalid.data`; otherwise reading it fails.
-- Not supported, for reads and writes: footer lines (`skip.footer.line.count`), header lines in JsonSerDe tables,
-  nested columns, multi-byte quote or escape characters, and for LazySimpleSerDe `escape.delim`, a non-UTF-8
-  `serialization.encoding`, `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the
-  NULL string. Writes need a single-byte delimiter.
+- Not supported, for reads and writes: footer lines (`skip.footer.line.count`), header lines in JsonSerDe tables, nested
+  columns, multi-byte quote or escape characters, and for LazySimpleSerDe `serialization.escape.crlf`, an `escape.delim`
+  that is the delimiter or longer than one byte, a non-UTF-8 `serialization.encoding`,
+  `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the NULL string. Writes need a
+  single-byte delimiter.
+- LazySimpleSerDe with `escape.delim` (one byte): the escape character makes the next character part of the field,
+  a delimiter included (`a\,b` is `a,b`, `\\` is `\`); `\N` is still NULL. An escaped line break continues the field
+  (Hive ends the record there). Writes escape the escape character and the delimiter in each value.
 - As in Hive, a table property overrides the SerDe property of the same name and keys are case-sensitive. Line counts
   and byte codes are DuckDB integer casts (`'1.5'` is 2). Partitions are read with the table's SerDe and SerDe
   properties: a scan that reaches a partition whose own InputFormat, SerDe or SerDe properties read its files

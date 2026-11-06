@@ -246,8 +246,14 @@ void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
 		return;
 	}
 	string value;
-	if (TryGetProperty("escape.delim", value)) {
-		refuse("has 'escape.delim' set");
+	if (GetEscapeCharacter().size() > 1) {
+		refuse("has an 'escape.delim' of more than one byte");
+	}
+	if (GetEscapeCharacter() == GetFieldDelimiter()) {
+		refuse("has its field delimiter as 'escape.delim'");
+	}
+	if (TryGetProperty("serialization.escape.crlf", value) && StringUtil::CIEquals(value, "true")) {
+		refuse("has 'serialization.escape.crlf' set");
 	}
 	if (TryGetProperty("serialization.encoding", value) && !StringUtil::CIEquals(value, "UTF-8") &&
 	    !StringUtil::CIEquals(value, "UTF8")) {
@@ -322,7 +328,14 @@ string GlueTableInfo::GetQuoteCharacter() const {
 }
 
 string GlueTableInfo::GetEscapeCharacter() const {
-	return GetSerDe() == HiveSerDe::OPEN_CSV ? GetOpenCSVCharacter("escapeChar", GetQuoteCharacter()) : string();
+	if (GetSerDe() == HiveSerDe::OPEN_CSV) {
+		return GetOpenCSVCharacter("escapeChar", GetQuoteCharacter());
+	}
+	string escape;
+	if (TryGetProperty("escape.delim", escape)) {
+		return escape;
+	}
+	return string();
 }
 
 HiveCSVOptions GlueTableInfo::GetCSVOptions() const {

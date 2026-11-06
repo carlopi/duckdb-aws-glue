@@ -125,15 +125,22 @@ static unique_ptr<Expression> EpochField(ClientContext &context, unique_ptr<Expr
 	return make_uniq<BoundCaseExpression>(std::move(infinite), std::move(raise), std::move(number));
 }
 
-//! A value's text with 'escape' doubled, which a reader that drops an unpaired escape character (OpenCSVSerde) reads
-//! back as one
+//! A value's text with 'escape' put before each escape character and, unless empty, each 'delimiter': LazySimpleSerDe
+//! reads both back as written, and OpenCSVSerde, which drops an unpaired escape character, reads a doubled one as one
 static unique_ptr<Expression> EscapedTextField(ClientContext &context, unique_ptr<Expression> text,
-                                               const string &escape) {
-	vector<unique_ptr<Expression>> children;
-	children.push_back(std::move(text));
-	children.push_back(make_uniq<BoundConstantExpression>(Value(escape)));
-	children.push_back(make_uniq<BoundConstantExpression>(Value(escape + escape)));
-	return BindFunction(context, "replace", std::move(children));
+                                               const string &escape, const string &delimiter) {
+	vector<string> specials {escape};
+	if (!delimiter.empty()) {
+		specials.push_back(delimiter);
+	}
+	for (auto &special : specials) {
+		vector<unique_ptr<Expression>> children;
+		children.push_back(std::move(text));
+		children.push_back(make_uniq<BoundConstantExpression>(Value(special)));
+		children.push_back(make_uniq<BoundConstantExpression>(Value(escape + special)));
+		text = BindFunction(context, "replace", std::move(children));
+	}
+	return text;
 }
 
 static optional_ptr<CopyFunctionCatalogEntry> TryGetCopyFunction(DatabaseInstance &db, const string &name) {
@@ -382,18 +389,26 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		copy_options[Identifier("header")] = {Value::BOOLEAN(header_lines == 1)};
 		copy_options[Identifier("delimiter")] = {Value(delimiter)};
 		copy_options[Identifier("quote")] = {Value(table_info.GetQuoteCharacter())};
-		copy_options[Identifier("escape")] = {Value(table_info.GetEscapeCharacter())};
+		// LazySimpleSerDe's escape is written by EscapedTextField: DuckDB escapes only inside quotes
+		auto escape = quoted ? string() : table_info.GetEscapeCharacter();
+		copy_options[Identifier("escape")] = {Value(quoted ? table_info.GetEscapeCharacter() : string())};
 		copy_options[Identifier("nullstr")] = {Value(null_string)};
 		if (quoted) {
 			// as Hive writes OpenCSVSerde files, so that an escape character in a value is escaped too
 			copy_options[Identifier("force_quote")] = {Value("*")};
 		}
 		// every data column is written as text, refused where a field of the table's files can not hold it
-		string forbidden = quoted ? "\n\r" : "\n\r" + delimiter;
-		auto reason = quoted ? string("holds a line break")
-		                     : StringUtil::Format("holds the field delimiter '%s' or a line break, or is the table's "
-		                                          "NULL string '%s'",
-		                                          DelimiterToString(delimiter), null_string);
+		string forbidden = quoted || !escape.empty() ? "\n\r" : "\n\r" + delimiter;
+		string reason;
+		if (quoted) {
+			reason = "holds a line break";
+		} else if (!escape.empty()) {
+			reason = StringUtil::Format("holds a line break or is the table's NULL string '%s'", null_string);
+		} else {
+			reason = StringUtil::Format("holds the field delimiter '%s' or a line break, or is the table's NULL string "
+			                            "'%s'",
+			                            DelimiterToString(delimiter), null_string);
+		}
 		vector<unique_ptr<Expression>> select_list;
 		vector<LogicalType> projected_types;
 		auto csv_options = table_info.GetCSVOptions();
@@ -416,8 +431,10 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 				// only unquoted fields can not tell the NULL string from NULL
 				column =
 				    CheckedTextField(context, std::move(column), forbidden, quoted ? nullptr : &null_string, message);
-				if (!csv_options.field_escape.empty()) {
-					column = EscapedTextField(context, std::move(column), csv_options.field_escape);
+				if (!escape.empty()) {
+					column = EscapedTextField(context, std::move(column), escape, delimiter);
+				} else if (!csv_options.field_escape.empty()) {
+					column = EscapedTextField(context, std::move(column), csv_options.field_escape, string());
 				}
 				copy_types[i] = LogicalType::VARCHAR;
 			}
