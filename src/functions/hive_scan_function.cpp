@@ -18,9 +18,7 @@ namespace {
 
 //! The partition location when none is given: <root>/<key>=<value>/...
 string DefaultPartitionLocation(const HiveScanInfo &info, const vector<string> &values) {
-	auto location = info.root_location;
-	StringUtil::RTrim(location, "/");
-	return location + "/" + HivePartitionDirectory(info.partition_keys, values);
+	return Path::FromString(info.root_location).Join(HivePartitionDirectory(info.partition_keys, values)).ToString();
 }
 
 void ParseSchema(ClientContext &context, HiveScanInfo &info, const Value &schema) {

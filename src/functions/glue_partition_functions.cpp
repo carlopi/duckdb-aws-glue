@@ -174,7 +174,7 @@ string DefaultPartitionLocation(const GluePartitionTarget &target, const vector<
 	for (auto &key : target.table.partition_keys) {
 		keys.push_back(key.name);
 	}
-	return location + "/" + HivePartitionDirectory(keys, values);
+	return Path::FromString(location).Join(HivePartitionDirectory(keys, values)).ToString();
 }
 
 //! Bind data for the functions that change one partition and report one row when executed

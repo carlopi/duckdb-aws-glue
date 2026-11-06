@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/path.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/vector.hpp"
 
@@ -12,6 +13,6 @@ string ComparableLocation(const string &location);
 bool LocationsOverlap(const string &a, const string &b);
 //! The hive directory of a partition relative to its table: <key>=<value>/..., escaped, with a Glue value of
 //! __HIVE_DEFAULT_PARTITION__ (NULL) kept as is
-string HivePartitionDirectory(const vector<string> &keys, const vector<string> &values);
+Path HivePartitionDirectory(const vector<string> &keys, const vector<string> &values);
 
 } // namespace duckdb

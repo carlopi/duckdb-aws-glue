@@ -285,7 +285,7 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 		auto relative_path = RelativePartitionPath(location, partition.location, writable);
 		// otherwise the rows are written to the partition's location with its Glue values, so that the INSERT
 		// does not register a second partition there
-		if (relative_path == HivePartitionDirectory(keys, canonical_values) && writable &&
+		if (relative_path == HivePartitionDirectory(keys, canonical_values).ToString() && writable &&
 		    partition.values == canonical_values) {
 			continue;
 		}

@@ -21,15 +21,15 @@ bool LocationsOverlap(const string &a, const string &b) {
 	return a == b || StringUtil::StartsWith(a, b + "/") || StringUtil::StartsWith(b, a + "/");
 }
 
-string HivePartitionDirectory(const vector<string> &keys, const vector<string> &values) {
+Path HivePartitionDirectory(const vector<string> &keys, const vector<string> &values) {
 	D_ASSERT(keys.size() == values.size());
-	vector<string> components;
+	Path result;
 	for (idx_t i = 0; i < keys.size(); i++) {
 		auto value = values[i] == HivePartitioning::DEFAULT_PARTITION_NAME ? values[i]
 		                                                                   : HivePartitioning::EscapeValue(values[i]);
-		components.push_back(HivePartitioning::Escape(keys[i]) + "=" + value);
+		result = result.Join(HivePartitioning::Escape(keys[i]) + "=" + value);
 	}
-	return StringUtil::Join(components, "/");
+	return result;
 }
 
 } // namespace duckdb
