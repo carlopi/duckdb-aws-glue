@@ -4,6 +4,7 @@
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/logging/logger.hpp"
+#include "duckdb/main/client_context.hpp"
 
 #include <aws/core/utils/json/JsonSerializer.h>
 #include <aws/glue/model/CreateTableRequest.h>
