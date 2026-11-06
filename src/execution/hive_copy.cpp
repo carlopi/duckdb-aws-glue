@@ -11,10 +11,9 @@
 #include "planning/hive_multi_file_reader.hpp"
 
 #include "duckdb/common/file_system.hpp"
-#include "duckdb/logging/logger.hpp"
-#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/logging/logger.hpp"
 
 namespace duckdb {
 
@@ -42,14 +41,13 @@ static void ThrowIfLocationInUse(ClientContext &context, GlueSchemaEntry &schema
 //! the data files are deleted instead.
 static void ClearLocation(ClientContext &context, GlueSchemaEntry &schema, const GlueTableInfo &table_info,
                           const string &location, bool overwrite) {
-	// the location is listed with a glob, which would miss its own files and match those of other prefixes
-	if (location.find_first_of("*?[") != string::npos) {
+	if (LocationHasGlob(location)) {
 		throw InvalidInputException("CREATE TABLE AS for Hive table '%s.%s' is not supported: its location '%s' "
 		                            "contains a glob character (*, ? or [)",
 		                            table_info.schema_name, table_info.name, location);
 	}
 	auto &fs = FileSystem::GetFileSystem(context);
-	auto listing = fs.GlobFileList(location + "/**", FileGlobOptions::ALLOW_EMPTY);
+	auto listing = ListLocation(fs, location);
 	vector<string> data_files;
 	for (auto &file : listing->Files()) {
 		if (!IsDataFile(file, location + "/")) {
@@ -91,7 +89,9 @@ GlueHiveCopy::GlueHiveCopy(PhysicalPlan &physical_plan, vector<LogicalType> type
 
 unique_ptr<GlobalSinkState> GlueHiveCopy::GetGlobalSinkState(ClientContext &context) const {
 	annotated_lock_guard<annotated_mutex> guard(start_lock);
-	if (!write_started) {
+	auto &transaction = GlueTransaction::Get(context, catalog);
+	// keyed on the transaction, not this operator: each execution of the plan registers its write
+	if (!transaction.FindHiveWrite(write_id)) {
 		GlueHiveWrite write;
 		write.write_id = write_id;
 		write.database_name = table_info.schema_name;
@@ -110,7 +110,7 @@ unique_ptr<GlobalSinkState> GlueHiveCopy::GetGlobalSinkState(ClientContext &cont
 				                       "TABLE IF NOT EXISTS",
 				                       table_info.name);
 			}
-			write.created_table_schema = schema;
+			write.created_table = true;
 			try {
 				write.created_table_time =
 				    GlueAPI::GetTableCreateTime(write.client, catalog, table_info.schema_name, table_info.name);
@@ -120,8 +120,7 @@ unique_ptr<GlobalSinkState> GlueHiveCopy::GetGlobalSinkState(ClientContext &cont
 				                   table_info.schema_name, table_info.name, ErrorData(ex).RawMessage());
 			}
 		}
-		GlueTransaction::Get(context, catalog).AddHiveWrite(std::move(write));
-		write_started = true;
+		transaction.AddHiveWrite(std::move(write));
 	}
 	return PhysicalCopyToFile::GetGlobalSinkState(context);
 }

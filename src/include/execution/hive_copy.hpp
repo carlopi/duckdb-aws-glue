@@ -33,7 +33,6 @@ private:
 	string write_id;
 	string location;
 	mutable annotated_mutex start_lock;
-	mutable bool write_started DUCKDB_GUARDED_BY(start_lock) = false;
 };
 
 } // namespace duckdb

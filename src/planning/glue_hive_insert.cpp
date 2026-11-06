@@ -721,7 +721,8 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		// partitions it registered stay, empty: another INSERT may have added rows to them in the meantime.
 		ErrorData error(ex);
 		try {
-			FileSystem::GetFileSystem(context).RemoveFiles(state.written_files);
+			// not the context's file system, which stops at the interrupt this may be handling
+			DatabaseInstance::GetDatabase(context).GetFileSystem().RemoveFiles(state.written_files);
 		} catch (std::exception &remove_ex) {
 			throw IOException("INSERT into Hive table '%s.%s' failed: %s. Deleting the %llu files it wrote failed too "
 			                  "(%s); remove them before running it again",

@@ -9,6 +9,7 @@
 #include "duckdb/transaction/transaction.hpp"
 
 #include "api/glue_api.hpp"
+#include "execution/hive_write_undo.hpp"
 
 #include <functional>
 
@@ -156,24 +157,6 @@ private:
 	unordered_map<string, CatalogCache> caches DUCKDB_GUARDED_BY(lock);
 };
 
-//! What an INSERT or CREATE TABLE AS into a Hive table changed, so that a failed statement can be taken back
-struct GlueHiveWrite {
-	string write_id;
-	string database_name;
-	string table_name;
-	//! The files of the write are named <write_id>_..., below this location
-	string location;
-	//! CREATE TABLE AS: the schema it created the table in, and the client to drop it with (the rollback runs when the
-	//! transaction has ended, too late to look up the secret)
-	optional_ptr<GlueSchemaEntry> created_table_schema;
-	std::shared_ptr<Aws::Glue::GlueClient> client;
-	//! The CreateTime of the table it created, if it could be fetched: a table with another one was created again by
-	//! someone else, and is not dropped
-	optional_idx created_table_time;
-	//! The statement deleted its files itself (a failed partition registration does), so the undo need not look
-	bool files_deleted = false;
-};
-
 //! Glue has no transactional semantics in this extension: every DDL statement is executed against the Glue API
 //! immediately. The transaction exists because every attached database needs one, and carries the metadata cache. It
 //! also keeps the Hive writes of the running statement: a write that is still there when the transaction ends belongs
@@ -203,11 +186,8 @@ public:
 	shared_ptr<GlueTransactionCache> cache;
 
 private:
-	//! Undo the writes that did not complete: delete their files and, for CREATE TABLE AS, the table. Best effort: a
-	//! step that fails is logged, and nothing is done once the connection is gone
+	//! Undo the writes that did not complete (UndoHiveWrite); nothing is done once the connection is gone
 	void UndoHiveWrites();
-	//! Delete the files, and the created table, of one write
-	static void UndoHiveWrite(ClientContext &context, GlueCatalog &catalog, GlueHiveWrite &write);
 
 	GlueTransactionState transaction_state;
 	mutex hive_writes_lock;

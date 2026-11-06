@@ -430,14 +430,19 @@ void GlueAPI::UpdateTableParameters(ClientContext &context, GlueCatalog &catalog
 	});
 }
 
-void GlueAPI::DeleteTable(ClientContext &context, const std::shared_ptr<Aws::Glue::GlueClient> &client,
-                          GlueCatalog &catalog, const string &database_name, const string &table_name) {
-	// no GlueHttpClientContextScope: the connection's HTTP parameters need its transaction, the database's do not
+static Aws::Glue::Model::DeleteTableOutcome RequestDeleteTable(Aws::Glue::GlueClient &client, GlueCatalog &catalog,
+                                                               const string &database_name, const string &table_name) {
 	Aws::Glue::Model::DeleteTableRequest request;
 	SetCatalogId(request, catalog);
 	request.SetDatabaseName(database_name);
 	request.SetName(table_name);
-	auto outcome = client->DeleteTable(request);
+	return client.DeleteTable(request);
+}
+
+void GlueAPI::DeleteTable(ClientContext &context, const std::shared_ptr<Aws::Glue::GlueClient> &client,
+                          GlueCatalog &catalog, const string &database_name, const string &table_name) {
+	// no GlueHttpClientContextScope: the connection's HTTP parameters need its transaction, the database's do not
+	auto outcome = RequestDeleteTable(*client, catalog, database_name, table_name);
 	if (!outcome.IsSuccess() && !IsEntityNotFound(outcome)) {
 		ThrowGlueError(outcome, StringUtil::Format("DeleteTable '%s.%s'", database_name, table_name));
 	}
@@ -466,11 +471,7 @@ void GlueAPI::DeleteTable(ClientContext &context, GlueCatalog &catalog, const st
 	CheckWritable(catalog, "DeleteTable");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	Aws::Glue::Model::DeleteTableRequest request;
-	SetCatalogId(request, catalog);
-	request.SetDatabaseName(database_name);
-	request.SetName(table_name);
-	auto outcome = client->DeleteTable(request);
+	auto outcome = RequestDeleteTable(*client, catalog, database_name, table_name);
 	if (!outcome.IsSuccess()) {
 		if (IsEntityNotFound(outcome)) {
 			throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,

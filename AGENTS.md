@@ -102,9 +102,10 @@ Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
   when the sink starts, before any output is initialized, as `PhysicalInsert` does. Each write gets a write id that
   prefixes its file names; the copy adds it to the `GlueTransaction` (with the created table) and
   `GlueHiveInsert::Finalize` completes it once the partitions are registered. A write still registered when the
-  transaction ends belongs to a failed statement: `GlueTransaction::Rollback` deletes its files (by prefix) and the
-  table a CTAS created, unless another writer's files are there or the table was created again since. A failed partition
-  registration deletes its files itself, in Finalize (the partitions it registered stay, empty).
+  transaction ends belongs to a failed statement: `GlueTransaction::Rollback` undoes it (`UndoHiveWrite`,
+  `src/execution/hive_write_undo.cpp`), deleting its files (by prefix) and the table a CTAS created, unless another
+  writer's data files are there or the table was created again since. A failed partition registration deletes its
+  files itself, in Finalize (the partitions it registered stay, empty).
 - **Partition DDL**: DuckDB has no `ALTER TABLE ... PARTITION` syntax, so `src/functions/glue_partition_functions.cpp`
   provides `glue_partitions`, `glue_add_partition`, ... and `glue_alter_table`; `src/grammar/glue_grammar.cpp` (grammar
   extension `glue_hive_ddl`, enabled with `SET active_grammar_extensions = ['glue_hive_ddl']`) rewrites Hive partition

@@ -154,7 +154,8 @@ public:
 	//! table does not exist, 0 if Glue gave none. Tells a table apart from one created again under its name.
 	static optional_idx GetTableCreateTime(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
 	                                       const string &database_name, const string &table_name);
-	//! Get (or create) the Glue client for the catalog, using the credentials of the configured DuckDB secret
+	//! Get (or create) the Glue client for the catalog, using the credentials of the configured DuckDB secret. Public
+	//! for the undo of a CREATE TABLE AS, which takes the client while the secret can still be looked up
 	static std::shared_ptr<Aws::Glue::GlueClient> GetClient(ClientContext &context, GlueCatalog &catalog);
 };
 

@@ -22,6 +22,9 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.default.undo_ctas;
 
 statement ok
+DROP TABLE IF EXISTS my_datalake.default.undo_ctas_marker;
+
+statement ok
 DROP TABLE IF EXISTS my_datalake.default.undo_ctas_partitioned;
 
 statement ok
@@ -118,6 +121,52 @@ SELECT count(*) FROM my_datalake.default.undo_ctas;
 
 statement ok
 DROP TABLE my_datalake.default.undo_ctas;
+
+#---------------------------------------------------------------------------
+# files a scan skips (_SUCCESS) do not keep the table of a failed CREATE TABLE AS, so it can be run again
+#---------------------------------------------------------------------------
+statement ok
+COPY (SELECT 1 AS done) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/undo_ctas_marker/_SUCCESS' (FORMAT csv);
+
+statement error
+CREATE TABLE my_datalake.default.undo_ctas_marker AS SELECT i, CASE WHEN i = 7 THEN error('boom') ELSE i END AS v FROM range(9) t(i);
+----
+boom
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'undo_ctas_marker';
+----
+0
+
+statement ok
+CREATE TABLE my_datalake.default.undo_ctas_marker AS SELECT i, i AS v FROM range(9) t(i);
+
+query I
+SELECT count(*) FROM my_datalake.default.undo_ctas_marker;
+----
+9
+
+statement ok
+DROP TABLE my_datalake.default.undo_ctas_marker;
+
+#---------------------------------------------------------------------------
+# an INSERT in an explicit transaction is refused before it writes, so a COMMIT finds no write to undo
+#---------------------------------------------------------------------------
+statement ok
+BEGIN;
+
+statement error
+INSERT INTO my_datalake.default.undo_write SELECT i, i % 3 FROM range(10) t(i);
+----
+Transaction support is not
+
+statement ok
+COMMIT;
+
+query I
+SELECT count(*) FROM my_datalake.default.undo_write;
+----
+18
 
 #---------------------------------------------------------------------------
 # a partitioned CREATE TABLE AS whose query fails after it has written files drops the table and deletes the files
