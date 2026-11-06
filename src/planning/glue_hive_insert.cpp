@@ -256,6 +256,10 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 	D_ASSERT(existing_table);
 	auto &glue_catalog = existing_table->catalog.Cast<GlueCatalog>();
 	auto partitions = GlueAPI::GetPartitions(context, glue_catalog, table_info.schema_name, table_info.name);
+	vector<string> keys;
+	for (auto column_index : partition_columns) {
+		keys.push_back(names[column_index].GetIdentifierName());
+	}
 	vector<pair<string, vector<string>>> custom_directories;
 	for (auto &partition : partitions) {
 		planned_locations.emplace(partition.values, partition.location);
@@ -265,20 +269,14 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 			                            StringUtil::Join(partition.values, ", "), table_info.name,
 			                            partition.values.size(), partition_columns.size());
 		}
-		string hive_directory;
-		// whether Glue holds each value as this INSERT would register it ('1', not '01', for an integer key)
-		bool canonical_values = true;
+		// the values as this INSERT would register them ('1', not '01', for an integer key)
+		vector<string> canonical_values;
 		vector<unique_ptr<Expression>> conditions;
 		for (idx_t i = 0; i < partition_columns.size(); i++) {
 			auto column_index = partition_columns[i];
 			auto value = GlueTypes::PartitionValue(context, table_info.partition_keys[i].name, partition.values[i],
 			                                       types[column_index]);
-			hive_directory += i > 0 ? "/" : "";
-			hive_directory += HivePartitioning::Escape(names[column_index].GetIdentifierName()) + "=";
-			hive_directory += value.IsNull() ? HivePartitioning::DEFAULT_PARTITION_NAME
-			                                 : HivePartitioning::EscapeValue(value.ToString());
-			canonical_values &=
-			    partition.values[i] == (value.IsNull() ? HivePartitioning::DEFAULT_PARTITION_NAME : value.ToString());
+			canonical_values.push_back(value.IsNull() ? HivePartitioning::DEFAULT_PARTITION_NAME : value.ToString());
 			conditions.push_back(BoundComparisonExpression::Create(
 			    ExpressionType::COMPARE_NOT_DISTINCT_FROM, make_uniq<BoundReferenceExpression>(types[column_index], i),
 			    make_uniq<BoundConstantExpression>(std::move(value))));
@@ -287,7 +285,8 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 		auto relative_path = RelativePartitionPath(location, partition.location, writable);
 		// otherwise the rows are written to the partition's location with its Glue values, so that the INSERT
 		// does not register a second partition there
-		if (relative_path == hive_directory && writable && canonical_values) {
+		if (relative_path == HivePartitionDirectory(keys, canonical_values) && writable &&
+		    partition.values == canonical_values) {
 			continue;
 		}
 		BoundCaseCheck check;

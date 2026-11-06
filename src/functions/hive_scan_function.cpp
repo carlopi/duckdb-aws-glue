@@ -8,6 +8,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
 
+#include "core/hive_location.hpp"
 #include "planning/hive_multi_file_reader.hpp"
 #include "planning/hive_query_cache.hpp"
 
@@ -19,15 +20,7 @@ namespace {
 string DefaultPartitionLocation(const HiveScanInfo &info, const vector<string> &values) {
 	auto location = info.root_location;
 	StringUtil::RTrim(location, "/");
-	for (idx_t i = 0; i < info.partition_keys.size(); i++) {
-		location += "/" + HivePartitioning::Escape(info.partition_keys[i]) + "=";
-		if (values[i] == HivePartitioning::DEFAULT_PARTITION_NAME) {
-			location += values[i];
-		} else {
-			location += HivePartitioning::EscapeValue(values[i]);
-		}
-	}
-	return location;
+	return location + "/" + HivePartitionDirectory(info.partition_keys, values);
 }
 
 void ParseSchema(ClientContext &context, HiveScanInfo &info, const Value &schema) {
