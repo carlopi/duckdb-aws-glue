@@ -13,14 +13,6 @@
 #include "core/readers/hive_csv_options.hpp"
 #include "core/readers/hive_json_options.hpp"
 
-namespace Aws {
-namespace Glue {
-namespace Model {
-class Partition;
-} // namespace Model
-} // namespace Glue
-} // namespace Aws
-
 namespace duckdb {
 
 //! A table / partition as the Glue SDK returned it, kept with the projection so that a write can be built from it
