@@ -66,6 +66,17 @@ unique_ptr<FunctionData> GlueRepairTableBind(ClientContext &context, TableFuncti
 	auto result = make_uniq<GlueRepairTableBindData>();
 	result->target = ResolveGlueTable(context, "glue_repair_table", input.inputs[0]);
 	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_repair_table");
+	auto &table = result->target.table;
+	// the partitions are read from the directory layout Hive writes; another engine's InputFormat lays files out its
+	// way
+	auto file_format = table.GetFileFormat();
+	if (!table.GetFormat().IsWritable(table, file_format)) {
+		throw NotImplementedException("glue_repair_table of Glue table '%s' is not supported: its InputFormat '%s' is "
+		                              "not one Hive uses for %s tables, so DuckDB does not know how the files below "
+		                              "the table location are laid out",
+		                              result->target.TableName(), table.input_format,
+		                              HiveFileFormatToString(file_format));
+	}
 	ThrowIfReadWithFileCredentials(context, input.inputs[0], result->target);
 	result->root = result->target.table.location;
 	StringUtil::RTrim(result->root, "/");
