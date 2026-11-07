@@ -57,12 +57,16 @@ unique_ptr<SecretEntry> GlueCatalog::GetStorageSecret(ClientContext &context, co
 		    "No secret by the name of '%s' could be found, consider changing the 'secret'", secret_name);
 	}
 
-	for (auto &type : accepted_secret_types) {
-		//! Lookup the default secret for this type
+	// A default secret the user created, s3 before aws, before one a scope lookup finds: the aws extension answers
+	// such a lookup with its own default secret, which holds no credentials until its chain resolves, if it can
+	const vector<string> ordered_types {"s3", "aws"};
+	for (auto &type : ordered_types) {
 		auto secret_entry = secret_manager.GetSecretByName(transaction, StringUtil::Format("__default_%s", type));
 		if (secret_entry) {
 			return secret_entry;
 		}
+	}
+	for (auto &type : ordered_types) {
 		auto secret_match = secret_manager.LookupSecret(transaction, type + "://", type);
 		if (secret_match.HasMatch()) {
 			return std::move(secret_match.secret_entry);
