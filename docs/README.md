@@ -523,7 +523,9 @@ DESTROY EXTERNAL RESOURCE shared;
 ```
 
 The listing is GetCatalogs with the credentials of the default secret; where Glue has no catalogs API (moto) or
-refuses it, it is the default catalog alone, found as the catalog of its databases. Status lists one page of the
+refuses it, it is the default catalog alone, found as the catalog of its databases. A catalog tree is per region:
+without `region` the default-enabled commercial regions are swept in parallel and a region that refuses is left out,
+with `region` that one is listed and its errors thrown. Status lists one page of the
 catalog's databases to tell it exists, and hands ATTACH the ARN as the path, `glue` as the type and the handle's
 `endpoint` and `secret` as options. Create without `path` is the root catalog of `region`, which exists in every region: nothing is created, and
 destroying it does nothing (`kept`). Glue creates no native catalog below the root, so create with `path` (a nested

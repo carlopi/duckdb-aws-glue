@@ -23,18 +23,23 @@ SELECT name, kind, origin, list_function FROM duckdb_external_resource_types() W
 aws:glue:catalog	catalog	extension	__glue__catalog__list
 
 # the local server has no catalogs API, so the listing is the default catalog alone, found as the catalog of its
-# databases; the handle carries the endpoint the params named, the region comes from the secret
+# databases; without a region the default regions are swept, and the local server keeps its databases in us-east-1
+# only; the handle carries the endpoint the params named
 query IIIII
 SELECT handle, name, reference, state, metadata
 FROM __glue__catalog__list(MAP {'endpoint': '{GLUE_ENDPOINT}'});
 ----
 {arn='arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog', endpoint='{GLUE_ENDPOINT}'}	{GLUE_CATALOG_ID}	arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog	ready	{catalog_id={GLUE_CATALOG_ID}, type=native, description=''}
 
-# a region given explicitly: the local server keeps its databases per region, and without a database to report the
-# catalog id there is no row for the default catalog
+# one region: that one alone; without a database to report the catalog id there is no row for the default catalog
 query I
 SELECT reference FROM __glue__catalog__list(MAP {'endpoint': '{GLUE_ENDPOINT}', 'region': 'eu-central-1'});
 ----
+
+query I
+SELECT reference FROM __glue__catalog__list(MAP {'endpoint': '{GLUE_ENDPOINT}', 'region': 'us-east-1'});
+----
+arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog
 
 statement error
 SELECT * FROM __glue__catalog__list(MAP {'endpoint': '{GLUE_ENDPOINT}', 'secret': 'no_such_secret'});

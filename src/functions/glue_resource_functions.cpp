@@ -4,12 +4,14 @@
 #include "catalog/glue_arn.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_options.hpp"
+#include "api/glue_http_client.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/external_resource_type_registry.hpp"
 #include "duckdb/main/secret/secret.hpp"
+#include "duckdb/parallel/task_executor.hpp"
 
 #include <algorithm>
 
@@ -57,7 +59,7 @@ Value MapOf(vector<Value> keys, vector<Value> values) {
 }
 
 //! The connection the params / handle describe: 'region' (default: the region of the secret), 'endpoint' and
-//! 'secret', the same keys as the ATTACH options. A handle names its region through its ARN.
+//! 'secret', the same keys as the ATTACH options. A handle names its region through its ARN, a listing sweeps regions.
 GlueAttachOptions OptionsOf(ClientContext &context, const Value &input, const string &catalog_id,
                             const string &region = string()) {
 	GlueAttachOptions options;
@@ -313,8 +315,65 @@ void DestroyFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &o
 //
 // Every node of the catalog tree: the default catalog and the catalogs under it, native, federated or managed. Where
 // Glue has no catalogs API (a local server) or refuses it, the default catalog alone, found as the catalog of its
-// databases.
+// databases. A catalog tree is per region: 'region' lists that one, its errors thrown; without it the default
+// regions are swept in parallel, as the aws extension lists table buckets, and a region that refuses (not enabled
+// for the account, no permission) is left out.
 //===--------------------------------------------------------------------===//
+
+//! The regions a sweep covers: the default-enabled commercial regions, the list the aws extension sweeps
+const vector<string> &DefaultAwsRegions() {
+	static const vector<string> regions = {
+	    "us-east-1",      "us-east-2",      "us-west-1",      "us-west-2",      "ca-central-1",  "sa-east-1",
+	    "eu-west-1",      "eu-west-2",      "eu-west-3",      "eu-central-1",   "eu-north-1",    "ap-south-1",
+	    "ap-northeast-1", "ap-northeast-2", "ap-northeast-3", "ap-southeast-1", "ap-southeast-2"};
+	return regions;
+}
+
+//! The nodes of one region's tree, or its root alone where the catalogs API is unavailable; empty when the region
+//! refuses, unless 'rethrow'
+vector<GlueCatalogNodeInfo> RegionNodes(ClientContext &context, const GlueAttachOptions &options, bool rethrow) {
+	try {
+		try {
+			return GlueAPI::GetCatalogs(context, options);
+		} catch (GlueException &) {
+			vector<GlueCatalogNodeInfo> nodes;
+			GlueCatalogNodeInfo root;
+			root.catalog_id = GlueAPI::GetReportedCatalogId(context, options);
+			if (!root.catalog_id.empty()) {
+				root.name = root.catalog_id;
+				root.kind = "native";
+				nodes.push_back(std::move(root));
+			}
+			return nodes;
+		}
+	} catch (std::exception &) {
+		if (rethrow) {
+			throw;
+		}
+		return {};
+	}
+}
+
+class ListRegionTask : public BaseExecutorTask {
+public:
+	ListRegionTask(TaskExecutor &executor, ClientContext &context, GlueAttachOptions options,
+	               vector<GlueCatalogNodeInfo> &result)
+	    : BaseExecutorTask(executor), context(context), options(std::move(options)), result(result) {
+	}
+
+	void ExecuteTask() override {
+		GlueHttpClientContextScope http_scope(context);
+		result = RegionNodes(context, options, false);
+	}
+	string TaskType() const override {
+		return "ListRegionTask";
+	}
+
+private:
+	ClientContext &context;
+	GlueAttachOptions options;
+	vector<GlueCatalogNodeInfo> &result;
+};
 
 unique_ptr<FunctionData> ListBind(ClientContext &, TableFunctionBindInput &input, vector<LogicalType> &return_types,
                                   vector<Identifier> &names) {
@@ -339,23 +398,27 @@ void ListFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &outp
 	auto &bind = data_p.bind_data->Cast<ResourceBindData>();
 	if (!state.ran) {
 		state.ran = true;
-		auto options = OptionsOf(context, bind.input, string());
-		vector<GlueCatalogNodeInfo> nodes;
-		try {
-			nodes = GlueAPI::GetCatalogs(context, options);
-		} catch (GlueException &) {
-			GlueCatalogNodeInfo root;
-			root.catalog_id = GlueAPI::GetReportedCatalogId(context, options);
-			if (!root.catalog_id.empty()) {
-				root.name = root.catalog_id;
-				root.kind = "native";
-				nodes.push_back(std::move(root));
+		// a sweep leaves out the regions that refuse, so what is wrong for every region is checked first
+		GlueCatalog::GetStorageSecret(context, StringUtil::Lower(MapLookup(bind.input, "secret")));
+		auto region = MapLookup(bind.input, "region");
+		auto regions = region.empty() ? DefaultAwsRegions() : vector<string> {region};
+		vector<vector<GlueCatalogNodeInfo>> nodes(regions.size());
+		if (regions.size() == 1) {
+			nodes[0] = RegionNodes(context, OptionsOf(context, bind.input, string(), regions[0]), true);
+		} else {
+			TaskExecutor executor(context, TaskSchedulerType::ASYNC);
+			for (idx_t i = 0; i < regions.size(); i++) {
+				executor.ScheduleTask(make_uniq<ListRegionTask>(
+				    executor, context, OptionsOf(context, bind.input, string(), regions[i]), nodes[i]));
 			}
+			executor.WorkOnTasks();
 		}
-		for (auto &node : nodes) {
-			auto arn = ArnOf(node, options.region);
-			state.rows.push_back(
-			    {HandleOf(arn, bind.input), Value(node.name), Value(arn), Value("ready"), MetadataOf(node)});
+		for (idx_t i = 0; i < regions.size(); i++) {
+			for (auto &node : nodes[i]) {
+				auto arn = ArnOf(node, regions[i]);
+				state.rows.push_back(
+				    {HandleOf(arn, bind.input), Value(node.name), Value(arn), Value("ready"), MetadataOf(node)});
+			}
 		}
 	}
 	EmitRows(state, output);
