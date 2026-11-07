@@ -515,20 +515,23 @@ SHOW ALL EXTERNAL RESOURCES;                      -- every node of the tree, ARN
 REGISTER EXTERNAL RESOURCE 'aws:glue:catalog' AS prod
     FROM MAP {'arn': 'arn:aws:glue:eu-central-1:123456789012:catalog'};
 ATTACH TO EXTERNAL RESOURCE prod AS g (DEFAULT_SCHEMA 'sales');
-CREATE EXTERNAL RESOURCE 'aws:glue:catalog' AS scratch (PATH 'scratch', REGION 'eu-central-1');
-ATTACH TO NEW TEMPORARY EXTERNAL RESOURCE 'aws:glue:catalog' (PATH 'tmp') AS t;   -- deleted on DETACH
-DESTROY EXTERNAL RESOURCE scratch;
+CREATE EXTERNAL RESOURCE 'aws:glue:catalog' AS virginia (REGION 'us-east-1');       -- the root catalog there
+ATTACH TO NEW TEMPORARY EXTERNAL RESOURCE 'aws:glue:catalog' (REGION 'us-east-1') AS v;
+CREATE EXTERNAL RESOURCE 'aws:glue:catalog' AS shared
+    (PATH 'shared', CONNECTION 'my-connection', IDENTIFIER 'arn:aws:...');       -- a federated catalog
+DESTROY EXTERNAL RESOURCE shared;
 ```
 
 The listing is GetCatalogs with the credentials of the default secret; where Glue has no catalogs API (moto) or
 refuses it, it is the default catalog alone, found as the catalog of its databases. Status lists one page of the
 catalog's databases to tell it exists, and hands ATTACH the ARN as the path, `glue` as the type and the handle's
-`endpoint` and `secret` as options. Create is CreateCatalog with `path` as the name (required; a nested `a/b/c` needs `a/b` to exist) and `region`,
-`description`, `endpoint` and `secret`; the catalog is marked with the parameter `duckdb-external-resource-type`.
-Destroy is DeleteCatalog of the catalogs under the node, deepest first, then of the node; the account's default
-catalog is refused. Creating a catalog needs Lake Formation set up in
-the account, and the tables of a catalog made this way are not Hive tables, so the extension lists but cannot scan
-them. All callbacks default `region` to the region of the secret.
+`endpoint` and `secret` as options. Create without `path` is the root catalog of `region`, which exists in every region: nothing is created, and
+destroying it does nothing (`kept`). Glue creates no native catalog below the root, so create with `path` (a nested
+`a/b/c` needs `a/b` to exist) is CreateCatalog of a federated catalog, `connection` and `identifier` naming its
+source, or of a Redshift-managed one, `redshift_catalog_arn`; also `description`, `endpoint` and `secret`. The
+catalog is marked with the parameter `duckdb-external-resource-type`. Destroy is DeleteCatalog of the catalogs under
+the node, deepest first, then of the node. The tables of a federated or managed catalog are not Hive
+tables, so the extension lists but cannot scan them. All callbacks default `region` to the region of the secret.
 
 ## Testing
 

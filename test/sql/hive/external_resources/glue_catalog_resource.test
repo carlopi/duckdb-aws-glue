@@ -9,12 +9,12 @@ require glue
 require-env GLUE_CATALOG_ID
 
 # the local server answers the catalogs API with an internal error, which both the SDK and DuckDB's transport would
-# otherwise retry with backoff
+# otherwise retry with backoff; global, so that the internal connection the framework runs callbacks on sees it too
 statement ok
-SET glue_max_retries = 0;
+SET GLOBAL glue_max_retries = 0;
 
 statement ok
-SET http_retries = 0;
+SET GLOBAL http_retries = 0;
 
 # the type is registered from C++ (origin 'extension'), so loading the extension is all a user needs
 query IIII
@@ -80,31 +80,57 @@ default
 statement ok
 DETACH registered_datalake;
 
-# the default catalog is never destroyed
-statement error
-DESTROY EXTERNAL RESOURCE local_glue;
+# the root catalog is never deleted: destroying it does nothing
+query I
+SELECT status FROM __glue__catalog__destroy(MAP {'arn': 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog', 'endpoint': '{GLUE_ENDPOINT}'});
 ----
-the default catalog of an account cannot be destroyed
+kept
+
+statement ok
+DESTROY EXTERNAL RESOURCE local_glue;
+
+# create without a path is the root catalog of the region, which exists: the handle is its ARN, nothing is created
+query I
+SELECT handle FROM __glue__catalog__create(MAP {'endpoint': '{GLUE_ENDPOINT}'});
+----
+{arn='arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog', endpoint='{GLUE_ENDPOINT}'}
+
+statement ok
+ATTACH TO NEW TEMPORARY EXTERNAL RESOURCE 'aws:glue:catalog' (ENDPOINT '{GLUE_ENDPOINT}') AS root_datalake;
+
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'root_datalake' AND schema_name = 'default';
+----
+default
+
+statement ok
+DETACH root_datalake;
 
 # the local server has no catalogs API: creating and deleting a catalog reach it and fail there
-statement error
-SELECT * FROM __glue__catalog__create(MAP {'endpoint': '{GLUE_ENDPOINT}'});
-----
-'path', the name of the catalog to create, is required
-
+# Glue creates no native catalog below the root
 statement error
 SELECT * FROM __glue__catalog__create(MAP {'path': 'scratch', 'endpoint': '{GLUE_ENDPOINT}'});
 ----
+Glue creates no native catalog below the root
+
+statement error
+SELECT * FROM __glue__catalog__create(MAP {'path': 'scratch', 'connection': 'c', 'endpoint': '{GLUE_ENDPOINT}'});
+----
+needs both 'connection' and 'identifier'
+
+statement error
+SELECT * FROM __glue__catalog__create(MAP {'path': 'scratch', 'connection': 'c', 'identifier': 'i', 'endpoint': '{GLUE_ENDPOINT}'});
+----
 Glue CreateCatalog 'scratch' failed
 
-# a nested catalog needs its parent, which is looked up first
+# a nested catalog needs its parent, which is looked up first, by its account-qualified id
 statement error
-SELECT * FROM __glue__catalog__create(MAP {'path': 'scratch/child', 'endpoint': '{GLUE_ENDPOINT}'});
+SELECT * FROM __glue__catalog__create(MAP {'path': 'scratch/child', 'connection': 'c', 'identifier': 'i', 'endpoint': '{GLUE_ENDPOINT}'});
 ----
-Glue GetCatalog 'scratch' failed
+Glue GetCatalog '{GLUE_CATALOG_ID}:scratch' failed
 
 statement error
-SELECT * FROM __glue__catalog__create(MAP {'path': '/child', 'endpoint': '{GLUE_ENDPOINT}'});
+SELECT * FROM __glue__catalog__create(MAP {'path': '/child', 'connection': 'c', 'identifier': 'i', 'endpoint': '{GLUE_ENDPOINT}'});
 ----
 the parent catalog '' of '/child' does not exist
 

@@ -42,14 +42,13 @@ public:
 	static string GetReportedCatalogId(ClientContext &context, GlueCatalog &catalog);
 	static string GetReportedCatalogId(ClientContext &context, const GlueAttachOptions &options);
 	//! The catalog tree of the account, its default catalog and every catalog under it, or with 'parent_catalog_id'
-	//! the subtree under that catalog, without it (GetCatalogs)
+	//! the subtree under that catalog, without it (GetCatalogs); not 'recursive' lists one level only
 	static vector<GlueCatalogNodeInfo> GetCatalogs(ClientContext &context, const GlueAttachOptions &options,
-	                                               const string &parent_catalog_id = string());
+	                                               const string &parent_catalog_id = string(), bool recursive = true);
 	//! The catalog 'options.catalog_id' names (GetCatalog), false if it does not exist
 	static bool GetCatalog(ClientContext &context, const GlueAttachOptions &options, GlueCatalogNodeInfo &result);
 	//! Create a catalog under the account's default catalog (CreateCatalog)
-	static void CreateCatalog(ClientContext &context, const GlueAttachOptions &options, const string &name,
-	                          const string &description, const unordered_map<string, string> &parameters);
+	static void CreateCatalog(ClientContext &context, const GlueAttachOptions &options, const GlueCatalogInput &input);
 	//! Delete the catalog 'options.catalog_id' names (DeleteCatalog)
 	static void DeleteCatalog(ClientContext &context, const GlueAttachOptions &options);
 

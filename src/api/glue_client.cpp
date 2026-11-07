@@ -14,6 +14,8 @@
 #include <aws/core/client/RetryStrategy.h>
 #include <aws/glue/model/CreateCatalogRequest.h>
 #include <aws/glue/model/DeleteCatalogRequest.h>
+#include <aws/glue/model/FederatedCatalog.h>
+#include <aws/glue/model/TargetRedshiftCatalog.h>
 #include <aws/glue/model/GetCatalogRequest.h>
 #include <aws/glue/model/GetCatalogsRequest.h>
 #include <aws/glue/model/GetDatabasesRequest.h>
@@ -223,7 +225,7 @@ bool GlueAPI::GetCatalog(ClientContext &context, const GlueAttachOptions &option
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, options);
 	Aws::Glue::Model::GetCatalogRequest request;
-	request.SetCatalogId(options.catalog_id);
+	SetCatalogId(request, options);
 	auto outcome = client->GetCatalog(request);
 	if (!outcome.IsSuccess()) {
 		if (IsEntityNotFound(outcome)) {
@@ -235,23 +237,36 @@ bool GlueAPI::GetCatalog(ClientContext &context, const GlueAttachOptions &option
 	return true;
 }
 
-void GlueAPI::CreateCatalog(ClientContext &context, const GlueAttachOptions &options, const string &name,
-                            const string &description, const unordered_map<string, string> &parameters) {
+void GlueAPI::CreateCatalog(ClientContext &context, const GlueAttachOptions &options, const GlueCatalogInput &catalog) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, options);
 	Aws::Glue::Model::CatalogInput input;
-	if (!description.empty()) {
-		input.SetDescription(description);
+	if (!catalog.description.empty()) {
+		input.SetDescription(catalog.description);
 	}
-	if (!parameters.empty()) {
-		input.SetParameters(ToAwsMap(parameters));
+	if (!catalog.parameters.empty()) {
+		input.SetParameters(ToAwsMap(catalog.parameters));
+	}
+	if (!catalog.connection_name.empty()) {
+		Aws::Glue::Model::FederatedCatalog federated;
+		federated.SetConnectionName(catalog.connection_name);
+		federated.SetIdentifier(catalog.identifier);
+		if (!catalog.connection_type.empty()) {
+			federated.SetConnectionType(catalog.connection_type);
+		}
+		input.SetFederatedCatalog(std::move(federated));
+	}
+	if (!catalog.redshift_catalog_arn.empty()) {
+		Aws::Glue::Model::TargetRedshiftCatalog target;
+		target.SetCatalogArn(catalog.redshift_catalog_arn);
+		input.SetTargetRedshiftCatalog(std::move(target));
 	}
 	Aws::Glue::Model::CreateCatalogRequest request;
-	request.SetName(name);
+	request.SetName(catalog.name);
 	request.SetCatalogInput(std::move(input));
 	auto outcome = client->CreateCatalog(request);
 	if (!outcome.IsSuccess()) {
-		ThrowGlueError(outcome, StringUtil::Format("CreateCatalog '%s'", name));
+		ThrowGlueError(outcome, StringUtil::Format("CreateCatalog '%s'", catalog.name));
 	}
 }
 
@@ -267,7 +282,7 @@ void GlueAPI::DeleteCatalog(ClientContext &context, const GlueAttachOptions &opt
 }
 
 vector<GlueCatalogNodeInfo> GlueAPI::GetCatalogs(ClientContext &context, const GlueAttachOptions &options,
-                                                 const string &parent_catalog_id) {
+                                                 const string &parent_catalog_id, bool recursive) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, options);
 	vector<GlueCatalogNodeInfo> result;
@@ -280,7 +295,7 @@ vector<GlueCatalogNodeInfo> GlueAPI::GetCatalogs(ClientContext &context, const G
 		} else {
 			request.SetParentCatalogId(parent_catalog_id);
 		}
-		request.SetRecursive(true);
+		request.SetRecursive(recursive);
 		if (!next_token.empty()) {
 			request.SetNextToken(next_token);
 		}

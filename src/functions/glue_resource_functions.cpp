@@ -130,10 +130,11 @@ void EmitRows(ResourceState &state, DataChunk &output) {
 //===--------------------------------------------------------------------===//
 // create(params MAP) -> TABLE(handle MAP)
 //
-// CreateCatalog is synchronous, so this returns the handle of a catalog that already exists. Params: 'path', the name
-// of the catalog (required; a nested path 'a/b/c' is passed to Glue as given, once its parent 'a/b' is found to
-// exist), 'region' (default: the region of the secret), 'description', 'endpoint' and 'secret'. The account's default
-// catalog is never created: it exists.
+// Without 'path' the root catalog of 'region' (default: the region of the secret), which exists in every region and
+// is only resolved, never created. With 'path' a catalog under the root, which Glue only creates as a federated one,
+// 'connection' and 'identifier' naming its source, or a Redshift-managed one, 'redshift_catalog_arn'; a nested
+// 'a/b/c' needs 'a/b' to exist. CreateCatalog is synchronous, so the handle is of a catalog that already exists.
+// Also 'description', 'endpoint' and 'secret'.
 //===--------------------------------------------------------------------===//
 
 unique_ptr<FunctionData> CreateBind(ClientContext &, TableFunctionBindInput &input, vector<LogicalType> &return_types,
@@ -145,38 +146,79 @@ unique_ptr<FunctionData> CreateBind(ClientContext &, TableFunctionBindInput &inp
 	return std::move(result);
 }
 
+//! The root catalog of the region: the catalog id Glue reports for it (GetCatalog wants a catalog id, so it is the
+//! root of the catalogs listing), or, where there is no catalogs API, the one its databases report
+string RootCatalogId(ClientContext &context, const GlueAttachOptions &root) {
+	try {
+		for (auto &node : GlueAPI::GetCatalogs(context, root, string(), false)) {
+			if (node.catalog_id.find(':') == string::npos) {
+				return node.catalog_id;
+			}
+		}
+	} catch (GlueException &) {
+	}
+	auto reported = GlueAPI::GetReportedCatalogId(context, root);
+	if (reported.empty()) {
+		throw IOException("%s create: the account id of the root catalog in region '%s' can not be told: it has "
+		                  "no databases yet and the catalogs API is unavailable",
+		                  GLUE_CATALOG_TYPE, root.region);
+	}
+	return reported;
+}
+
 void CreateFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &state = data_p.global_state->Cast<ResourceState>();
 	auto &bind = data_p.bind_data->Cast<ResourceBindData>();
 	if (!state.ran) {
 		state.ran = true;
+		auto root = OptionsOf(context, bind.input, string());
 		auto path = MapLookup(bind.input, "path");
 		if (path.empty()) {
-			throw InvalidInputException("%s create: 'path', the name of the catalog to create, is required",
+			state.rows.push_back({HandleOf(CatalogArn(root.region, RootCatalogId(context, root)), bind.input)});
+			EmitRows(state, output);
+			return;
+		}
+
+		GlueCatalogInput input;
+		input.name = path;
+		input.description = MapLookup(bind.input, "description");
+		input.parameters[RESOURCE_TYPE_PARAMETER] = GLUE_CATALOG_TYPE;
+		input.connection_name = MapLookup(bind.input, "connection");
+		input.connection_type = MapLookup(bind.input, "connection_type");
+		input.identifier = MapLookup(bind.input, "identifier");
+		input.redshift_catalog_arn = MapLookup(bind.input, "redshift_catalog_arn");
+		if (input.connection_name.empty() == input.identifier.empty() && input.connection_name.empty() &&
+		    input.redshift_catalog_arn.empty()) {
+			throw InvalidInputException("%s create: Glue creates no native catalog below the root: give 'connection' "
+			                            "and 'identifier' for a federated catalog or 'redshift_catalog_arn' for a "
+			                            "Redshift-managed one, or no 'path' for the root catalog of the region",
 			                            GLUE_CATALOG_TYPE);
 		}
-		auto options = OptionsOf(context, bind.input, string());
-		// a nested catalog goes under a catalog that exists
+		if (input.connection_name.empty() != input.identifier.empty()) {
+			throw InvalidInputException("%s create: a federated catalog needs both 'connection' and 'identifier'",
+			                            GLUE_CATALOG_TYPE);
+		}
+		// a nested catalog goes under a catalog that exists; Glue wants its id qualified with the account
+		auto account_id = RootCatalogId(context, root);
 		auto separator = path.find_last_of('/');
 		if (separator != string::npos) {
 			auto parent = path.substr(0, separator);
 			GlueCatalogNodeInfo parent_node;
 			if (parent.empty() ||
-			    !GlueAPI::GetCatalog(context, OptionsOf(context, bind.input, parent, options.region), parent_node)) {
+			    !GlueAPI::GetCatalog(context, OptionsOf(context, bind.input, account_id + ":" + parent, root.region),
+			                         parent_node)) {
 				throw InvalidInputException("%s create: the parent catalog '%s' of '%s' does not exist",
 				                            GLUE_CATALOG_TYPE, parent, path);
 			}
 		}
-		unordered_map<string, string> parameters {{RESOURCE_TYPE_PARAMETER, GLUE_CATALOG_TYPE}};
-		GlueAPI::CreateCatalog(context, options, path, MapLookup(bind.input, "description"), parameters);
+		GlueAPI::CreateCatalog(context, root, input);
 
-		// the handle is the ARN, which Glue reports with the account id the name alone does not carry
-		auto created = OptionsOf(context, bind.input, path, options.region);
+		// the handle is the ARN, which Glue reports for the created catalog
 		GlueCatalogNodeInfo node;
-		if (!GlueAPI::GetCatalog(context, created, node)) {
+		if (!GlueAPI::GetCatalog(context, OptionsOf(context, bind.input, account_id + ":" + path, root.region), node)) {
 			throw IOException("%s create: catalog '%s' is not found after CreateCatalog", GLUE_CATALOG_TYPE, path);
 		}
-		state.rows.push_back({HandleOf(ArnOf(node, options.region), bind.input)});
+		state.rows.push_back({HandleOf(ArnOf(node, root.region), bind.input)});
 	}
 	EmitRows(state, output);
 }
@@ -227,8 +269,8 @@ void StatusFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
 //===--------------------------------------------------------------------===//
 // destroy(handle MAP) -> TABLE(status VARCHAR)
 //
-// DeleteCatalog on the catalog the handle names, after the catalogs under it, deepest first. The account's default
-// catalog cannot be deleted, and is refused before any call.
+// DeleteCatalog on the catalog the handle names, after the catalogs under it, deepest first. The root catalog of a
+// region exists whether or not anything refers to it, so destroying it does nothing and reports 'kept'.
 //===--------------------------------------------------------------------===//
 
 unique_ptr<FunctionData> DestroyBind(ClientContext &, TableFunctionBindInput &input, vector<LogicalType> &return_types,
@@ -247,9 +289,9 @@ void DestroyFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &o
 		state.ran = true;
 		auto arn = HandleArn(bind.input, "aws:glue:catalog destroy");
 		if (arn.catalog_id == arn.account_id) {
-			throw InvalidInputException("aws:glue:catalog destroy: the default catalog of an account cannot be "
-			                            "destroyed ('%s')",
-			                            MapLookup(bind.input, "arn"));
+			state.rows.push_back({Value("kept")});
+			EmitRows(state, output);
+			return;
 		}
 		auto options = OptionsOf(context, bind.input, arn.catalog_id, arn.region);
 		auto subtree = GlueAPI::GetCatalogs(context, options, arn.catalog_id);

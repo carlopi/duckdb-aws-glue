@@ -61,6 +61,20 @@ struct GlueCatalogNodeInfo {
 	unordered_map<string, string> parameters;
 };
 
+//! What CreateCatalog takes: Glue creates no native catalog below the root, only a federated one (the metadata held
+//! by the service a connection reaches) or a Redshift-managed one
+struct GlueCatalogInput {
+	string name;
+	string description;
+	unordered_map<string, string> parameters;
+	//! Federated: the connection and the identifier of the federated source
+	string connection_name;
+	string connection_type;
+	string identifier;
+	//! Redshift-managed: the ARN of the Redshift catalog
+	string redshift_catalog_arn;
+};
+
 //! The file format of a Hive table's data files, decided by its SerDe
 enum class HiveFileFormat : uint8_t { PARQUET, CSV, JSON, AVRO };
 string HiveFileFormatToString(HiveFileFormat format);
