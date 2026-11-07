@@ -241,9 +241,10 @@ static unique_ptr<Expression> FinishPartitionPath(unique_ptr<BoundCaseExpression
 }
 
 //! The PARTITION_PATH of the copy: the hive layout (<key>=<value>/...), except for the existing partitions registered
-//! at other locations, which are written to their own location. 'planned_locations' receives the location of every
-//! existing partition by its Glue values, and 'partition_directories' receives the directories of
-//! those partitions with their Glue values.
+//! at other locations, which are written to their own location, and the existing partitions whose column types differ
+//! from the table's, which a row may not be written to: files of the table's types in them would not match what the
+//! partition declares. 'planned_locations' receives the location of every existing partition by its Glue values, and
+//! 'partition_directories' receives the directories of the partitions at other locations with their Glue values.
 static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, optional_ptr<GlueTable> existing_table,
                                                   const GlueTableInfo &table_info, const string &location,
                                                   const vector<Identifier> &names, const vector<LogicalType> &types,
@@ -274,6 +275,8 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 	D_ASSERT(existing_table);
 	auto &glue_catalog = existing_table->catalog.Cast<GlueCatalog>();
 	auto partitions = GlueAPI::GetPartitions(context, glue_catalog, table_info.schema_name, table_info.name);
+	// matched as the scan matches the files' columns: by position in csv files, by name otherwise
+	auto columns_by_position = table_info.GetFileFormat() == HiveFileFormat::CSV;
 	vector<string> keys;
 	for (auto column_index : partition_columns) {
 		keys.push_back(names[column_index].GetIdentifierName());
@@ -299,12 +302,13 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 			    ExpressionType::COMPARE_NOT_DISTINCT_FROM, make_uniq<BoundReferenceExpression>(types[column_index], i),
 			    make_uniq<BoundConstantExpression>(std::move(value))));
 		}
+		auto mismatch = partition.FindColumnTypeMismatch(table_info.columns, columns_by_position);
 		bool writable;
 		auto relative_path = RelativePartitionPath(location, partition.location, writable);
 		// otherwise the rows are written to the partition's location with its Glue values, so that the INSERT
 		// does not register a second partition there
-		if (relative_path == HivePartitionDirectory(keys, canonical_values).ToString() && writable &&
-		    partition.values == canonical_values) {
+		if (!mismatch.IsValid() && relative_path == HivePartitionDirectory(keys, canonical_values).ToString() &&
+		    writable && partition.values == canonical_values) {
 			continue;
 		}
 		BoundCaseCheck check;
@@ -315,7 +319,21 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 			conjunction->GetChildrenMutable() = std::move(conditions);
 			check.when_expr = std::move(conjunction);
 		}
-		if (!writable) {
+		if (mismatch.IsValid()) {
+			auto &table_column = table_info.columns[mismatch.GetIndex()];
+			auto &partition_column =
+			    *partition.FindPartitionColumn(table_info.columns, mismatch.GetIndex(), columns_by_position);
+			auto message = StringUtil::Format(
+			    "Writing to Hive table '%s.%s' failed: partition [%s] declares column '%s' as '%s', but the table "
+			    "declares column '%s' as '%s'. The table schema changed after the partition was created, and "
+			    "inserting into a partition whose column types differ from the table's is not supported: the new files "
+			    "would not match the types the partition declares. Make the partition declare the table's columns "
+			    "first, e.g. by dropping it with glue_drop_partition and adding it again with glue_add_partition, "
+			    "which keeps its files",
+			    table_info.schema_name, table_info.name, StringUtil::Join(partition.values, ", "),
+			    partition_column.name, partition_column.type, table_column.name, table_column.type);
+			check.then_expr = ErrorExpression(context, function_binder, message);
+		} else if (!writable) {
 			check.then_expr = ErrorExpression(
 			    context, function_binder,
 			    StringUtil::Format("INSERT into Hive table '%s.%s' is not supported: partition [%s] is registered at "
