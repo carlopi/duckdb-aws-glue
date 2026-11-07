@@ -472,7 +472,8 @@ CALL enable_logging('HTTP', storage='memory');
 SELECT request.type, request.url, request.headers['x-amz-target'], response.status FROM duckdb_logs_parsed('HTTP');
 ```
 
-`SET glue_network_calls_via_duckdb = false` switches back to the SDK's own HTTP client.
+`SET glue_network_calls_via_duckdb = false` switches back to the SDK's own HTTP client (not under WebAssembly,
+where the SDK has none).
 
 `glue_requests()` lists the Glue requests in the `HTTP` log, retries and pages included: `operation` (the
 `X-Amz-Target`, e.g. `AWSGlue.GetPartitions`), `status`, `reason`, `start_time`, `duration_ms` and the
