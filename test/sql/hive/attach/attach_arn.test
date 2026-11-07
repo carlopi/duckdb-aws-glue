@@ -1,0 +1,92 @@
+# name: test/sql/hive/attach/attach_arn.test
+# description: ATTACH takes the catalog's ARN as the path, with the region taken from it
+# group: [attach]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+ATTACH 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog' AS arn_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'arn_datalake' AND schema_name = 'default';
+----
+default
+
+# the path reported for the attached catalog is the ARN as given
+query I
+SELECT path FROM duckdb_databases() WHERE database_name = 'arn_datalake';
+----
+arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog
+
+statement ok
+DETACH arn_datalake;
+
+# a nested catalog's ARN maps onto the '<account id>:<catalog>/<nested>' catalog id (no call is made here: the local
+# server knows no nested catalogs)
+statement ok
+ATTACH 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog/nscatalog/dbcatalog' AS nested_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    VERIFY_CONNECTION false
+);
+
+statement ok
+DETACH nested_datalake;
+
+# the region comes from the ARN: a REGION option is accepted when it agrees, refused when it does not
+statement ok
+ATTACH 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog' AS same_region_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    REGION 'us-east-1'
+);
+
+statement ok
+DETACH same_region_datalake;
+
+statement error
+ATTACH 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog' AS bad_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    REGION 'eu-west-1'
+);
+----
+ATTACH option 'region' ('eu-west-1') conflicts with the region of the ARN ('us-east-1')
+
+statement error
+ATTACH 'arn:aws:s3:::some-bucket' AS bad_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+----
+is not a Glue ARN (service 's3')
+
+statement error
+ATTACH 'arn:aws:glue::{GLUE_CATALOG_ID}:catalog' AS bad_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+----
+does not specify a region
+
+statement error
+ATTACH 'arn:aws:glue:us-east-1:12345:catalog' AS bad_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+----
+does not specify a 12-digit account id
+
+statement error
+ATTACH 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:table/default/t' AS bad_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+----
+is not a catalog ARN
+
+statement error
+ATTACH 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog/nscatalog/' AS bad_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+----
+has an empty catalog name
+
+statement error
+ATTACH 'arn:aws:glue' AS bad_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+----
+Invalid Glue ARN

@@ -11,7 +11,7 @@ namespace duckdb {
 struct GlueAttachOptions {
 	//! The name of the attached database
 	string name;
-	//! The raw ATTACH path (':' | '<account id>' | '<account id>:<catalog>' | '<catalog>/<nested>' ...)
+	//! The raw ATTACH path (':' | '<account id>' | '<account id>:<catalog>' | '<catalog>/<nested>' ... or an ARN)
 	string path;
 	//! The Glue CatalogId sent with every request, empty means the default catalog of the current account
 	string catalog_id;
