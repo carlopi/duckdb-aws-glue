@@ -46,14 +46,27 @@ bool IsArn(const string &path) {
 struct GlueArn {
 	string region;
 	string catalog_id;
+	//! The database a database ARN names, empty for a catalog ARN
+	string database;
 };
 
-//! arn:<partition>:glue:<region>:<account id>:catalog[/<catalog>/<nested>...]
-GlueArn ParseGlueCatalogArn(const string &arn) {
+//! The catalog id of a non-empty catalog path
+string CatalogIdOf(const string &arn, const string &account_id, const string &catalog_path) {
+	if (catalog_path.empty() || catalog_path.front() == '/' || catalog_path.back() == '/' ||
+	    StringUtil::Contains(catalog_path, "//")) {
+		throw InvalidConfigurationException("Glue ARN '%s' has an empty catalog name", arn);
+	}
+	return account_id + ":" + catalog_path;
+}
+
+//! arn:<partition>:glue:<region>:<account id>:catalog[/<catalog>/<nested>...] or
+//! arn:<partition>:glue:<region>:<account id>:database/[<catalog>/<nested>/]<database>
+GlueArn ParseGlueArn(const string &arn) {
 	auto parts = StringUtil::Split(arn, ':');
 	if (parts.size() < 6) {
 		throw InvalidConfigurationException("Invalid Glue ARN '%s': expected "
-		                                    "'arn:<partition>:glue:<region>:<account id>:catalog[/<catalog>/<nested>]'",
+		                                    "'arn:<partition>:glue:<region>:<account id>:catalog[/<catalog>/<nested>]' "
+		                                    "or 'arn:<partition>:glue:<region>:<account id>:database/<database>'",
 		                                    arn);
 	}
 	if (StringUtil::Lower(parts[2]) != "glue") {
@@ -71,18 +84,26 @@ GlueArn ParseGlueCatalogArn(const string &arn) {
 	// the resource is everything after the fifth ':'
 	auto resource = StringUtil::Join(vector<string>(parts.begin() + 5, parts.end()), ":");
 	const string catalog_prefix = "catalog/";
+	const string database_prefix = "database/";
 	if (resource == "catalog") {
 		result.catalog_id = account_id;
 	} else if (StringUtil::StartsWith(resource, catalog_prefix)) {
-		auto catalog_path = resource.substr(catalog_prefix.size());
-		if (catalog_path.empty() || catalog_path.front() == '/' || catalog_path.back() == '/' ||
-		    StringUtil::Contains(catalog_path, "//")) {
-			throw InvalidConfigurationException("Glue ARN '%s' has an empty catalog name", arn);
+		result.catalog_id = CatalogIdOf(arn, account_id, resource.substr(catalog_prefix.size()));
+	} else if (StringUtil::StartsWith(resource, database_prefix)) {
+		// the database is the last segment, the segments before it the catalog it is in
+		auto path = resource.substr(database_prefix.size());
+		auto separator = path.find_last_of('/');
+		result.database = separator == string::npos ? path : path.substr(separator + 1);
+		if (result.database.empty()) {
+			throw InvalidConfigurationException("Glue ARN '%s' has an empty database name", arn);
 		}
-		result.catalog_id = account_id + ":" + catalog_path;
+		result.catalog_id =
+		    separator == string::npos ? account_id : CatalogIdOf(arn, account_id, path.substr(0, separator));
 	} else {
-		throw InvalidConfigurationException(
-		    "Glue ARN '%s' is not a catalog ARN: only a catalog ('catalog' or 'catalog/<name>') can be attached", arn);
+		throw InvalidConfigurationException("Glue ARN '%s' is not a catalog or database ARN: only a catalog "
+		                                    "('catalog' or 'catalog/<name>') or a database ('database/<name>') can be "
+		                                    "attached",
+		                                    arn);
 	}
 	return result;
 }
@@ -97,9 +118,12 @@ unique_ptr<Catalog> GlueAttach::Attach(optional_ptr<StorageExtensionInfo> storag
 	attach_options.path = info.path;
 	auto from_arn = IsArn(info.path);
 	if (from_arn) {
-		auto arn = ParseGlueCatalogArn(info.path);
+		auto arn = ParseGlueArn(info.path);
 		attach_options.catalog_id = arn.catalog_id;
 		attach_options.region = arn.region;
+		if (!arn.database.empty()) {
+			attach_options.default_schema = Identifier(arn.database);
+		}
 	} else {
 		SanityCheckGlueCatalogPath(attach_options.path);
 		if (attach_options.path != ":") {
@@ -130,7 +154,14 @@ unique_ptr<Catalog> GlueAttach::Attach(optional_ptr<StorageExtensionInfo> storag
 			attach_options.default_location = entry.second.ToString();
 			StringUtil::RTrim(attach_options.default_location, "/");
 		} else if (lower_name == "default_schema") {
-			attach_options.default_schema = Identifier(entry.second.ToString());
+			Identifier default_schema(entry.second.ToString());
+			if (!attach_options.default_schema.empty() &&
+			    default_schema.GetIdentifierName() != attach_options.default_schema.GetIdentifierName()) {
+				throw InvalidConfigurationException(
+				    "ATTACH option '%s' ('%s') conflicts with the database of the ARN ('%s')", entry.first,
+				    default_schema.GetIdentifierName(), attach_options.default_schema.GetIdentifierName());
+			}
+			attach_options.default_schema = default_schema;
 		} else if (lower_name == "verify_connection") {
 			attach_options.verify_connection = entry.second.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>();
 		} else {

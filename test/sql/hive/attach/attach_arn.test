@@ -1,5 +1,5 @@
 # name: test/sql/hive/attach/attach_arn.test
-# description: ATTACH takes the catalog's ARN as the path, with the region taken from it
+# description: ATTACH takes the ARN of the catalog, or of one of its databases, as the path
 # group: [attach]
 
 require httpfs
@@ -41,6 +41,78 @@ ATTACH 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog/nscatalog/dbcatalog' AS
 statement ok
 DETACH nested_datalake;
 
+# a database ARN attaches the database's catalog with the database as the default schema
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS setup_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}');
+
+statement ok
+CREATE SCHEMA IF NOT EXISTS setup_datalake.arn_attach_db;
+
+statement ok
+ATTACH 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:database/arn_attach_db' AS arn_db_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}'
+);
+
+statement ok
+USE arn_db_datalake;
+
+query I
+SELECT current_schema();
+----
+arn_attach_db
+
+statement ok
+USE memory;
+
+statement ok
+DETACH arn_db_datalake;
+
+# the database the ARN names has to exist
+statement error
+ATTACH 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:database/arn_attach_nope' AS bad_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}'
+);
+----
+default_schema 'arn_attach_nope' does not exist
+
+# the default schema comes from a database ARN: DEFAULT_SCHEMA is accepted when it agrees, refused when it does not
+statement ok
+ATTACH 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:database/arn_attach_db' AS same_db_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_SCHEMA 'arn_attach_db'
+);
+
+statement ok
+DETACH same_db_datalake;
+
+statement error
+ATTACH 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:database/arn_attach_db' AS bad_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_SCHEMA 'default'
+);
+----
+ATTACH option 'default_schema' ('default') conflicts with the database of the ARN ('arn_attach_db')
+
+statement error
+ATTACH 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:database/' AS bad_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+----
+has an empty database name
+
+statement error
+ATTACH 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:database//schemadb' AS bad_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+----
+has an empty catalog name
+
+statement ok
+DROP SCHEMA setup_datalake.arn_attach_db;
+
+statement ok
+DETACH setup_datalake;
+
 # the region comes from the ARN: a REGION option is accepted when it agrees, refused when it does not
 statement ok
 ATTACH 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog' AS same_region_datalake (
@@ -79,7 +151,7 @@ does not specify a 12-digit account id
 statement error
 ATTACH 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:table/default/t' AS bad_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
 ----
-is not a catalog ARN
+is not a catalog or database ARN
 
 statement error
 ATTACH 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog/nscatalog/' AS bad_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');

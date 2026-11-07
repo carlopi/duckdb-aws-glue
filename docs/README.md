@@ -16,8 +16,11 @@ SELECT * FROM my_datalake.default.some_table;
 
 The path is the catalog id Glue itself uses: `:` for the default catalog of the account of the credentials, a 12-digit
 account id, or `<account id>:<catalog>/<nested>` for a nested catalog. It can also be the catalog's ARN,
-`arn:aws:glue:<region>:<account id>:catalog` or `arn:aws:glue:<region>:<account id>:catalog/<catalog>/<nested>`; the
-region then comes from the ARN (a `REGION` given must be the same).
+`arn:aws:glue:<region>:<account id>:catalog` or `arn:aws:glue:<region>:<account id>:catalog/<catalog>/<nested>`, or
+the ARN of one of its databases, `arn:aws:glue:<region>:<account id>:database/<database>`
+(`database/<catalog>/<nested>/<database>` in a nested catalog), which attaches the database's catalog with that
+database as the default schema. The region, and the default schema for a database ARN, then come from the ARN (a
+`REGION` or `DEFAULT_SCHEMA` given must be the same).
 
 Attach options:
 
