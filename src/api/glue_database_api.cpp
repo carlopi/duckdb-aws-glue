@@ -6,6 +6,7 @@
 
 #include <aws/core/utils/json/JsonSerializer.h>
 #include <aws/glue/model/CreateDatabaseRequest.h>
+#include <aws/glue/model/DatabaseIdentifier.h>
 #include <aws/glue/model/DeleteDatabaseRequest.h>
 #include <aws/glue/model/GetDatabaseRequest.h>
 #include <aws/glue/model/GetDatabasesRequest.h>
@@ -13,18 +14,16 @@
 
 namespace duckdb {
 
-vector<GlueDatabaseInfo> GlueAPI::GetDatabases(ClientContext &context, GlueCatalog &catalog) {
-	GlueHttpClientContextScope http_scope(context);
-	auto client = GetClient(context, catalog);
+static vector<GlueDatabaseInfo> ListDatabases(Aws::Glue::GlueClient &client, const GlueAttachOptions &options) {
 	vector<GlueDatabaseInfo> result;
 	Aws::String next_token;
 	do {
 		Aws::Glue::Model::GetDatabasesRequest request;
-		SetCatalogId(request, catalog);
+		SetCatalogId(request, options);
 		if (!next_token.empty()) {
 			request.SetNextToken(next_token);
 		}
-		auto outcome = client->GetDatabases(request);
+		auto outcome = client.GetDatabases(request);
 		if (!outcome.IsSuccess()) {
 			ThrowGlueError(outcome, "GetDatabases");
 		}
@@ -37,14 +36,24 @@ vector<GlueDatabaseInfo> GlueAPI::GetDatabases(ClientContext &context, GlueCatal
 	return result;
 }
 
-bool GlueAPI::GetDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                          GlueDatabaseInfo &result, string *raw_json) {
+vector<GlueDatabaseInfo> GlueAPI::GetDatabases(ClientContext &context, GlueCatalog &catalog) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
+	return ListDatabases(*client, catalog.options);
+}
+
+vector<GlueDatabaseInfo> GlueAPI::GetDatabases(ClientContext &context, const GlueAttachOptions &options) {
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, options);
+	return ListDatabases(*client, options);
+}
+
+static bool FetchDatabase(Aws::Glue::GlueClient &client, const GlueAttachOptions &options, const string &database_name,
+                          GlueDatabaseInfo &result, string *raw_json) {
 	Aws::Glue::Model::GetDatabaseRequest request;
-	SetCatalogId(request, catalog);
+	SetCatalogId(request, options);
 	request.SetName(database_name);
-	auto outcome = client->GetDatabase(request);
+	auto outcome = client.GetDatabase(request);
 	if (!outcome.IsSuccess()) {
 		if (IsEntityNotFound(outcome)) {
 			return false;
@@ -59,12 +68,22 @@ bool GlueAPI::GetDatabase(ClientContext &context, GlueCatalog &catalog, const st
 	return true;
 }
 
-GlueCreateOutcome GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &catalog,
-                                          const GlueDatabaseInfo &database) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
-	CheckWritable(catalog, "CreateDatabase");
+bool GlueAPI::GetDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                          GlueDatabaseInfo &result, string *raw_json) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
+	return FetchDatabase(*client, catalog.options, database_name, result, raw_json);
+}
+
+bool GlueAPI::GetDatabase(ClientContext &context, const GlueAttachOptions &options, const string &database_name,
+                          GlueDatabaseInfo &result) {
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, options);
+	return FetchDatabase(*client, options, database_name, result, nullptr);
+}
+
+static GlueCreateOutcome PutDatabase(Aws::Glue::GlueClient &client, const GlueAttachOptions &options,
+                                     const GlueDatabaseInfo &database) {
 	Aws::Glue::Model::DatabaseInput input;
 	input.SetName(database.name);
 	if (!database.description.empty()) {
@@ -76,10 +95,21 @@ GlueCreateOutcome GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &c
 	if (!database.parameters.empty()) {
 		input.SetParameters(ToAwsMap(database.parameters));
 	}
+	if (!database.target_database.empty()) {
+		Aws::Glue::Model::DatabaseIdentifier target;
+		target.SetDatabaseName(database.target_database);
+		if (!database.target_catalog_id.empty()) {
+			target.SetCatalogId(database.target_catalog_id);
+		}
+		if (!database.target_region.empty()) {
+			target.SetRegion(database.target_region);
+		}
+		input.SetTargetDatabase(std::move(target));
+	}
 	Aws::Glue::Model::CreateDatabaseRequest request;
-	SetCatalogId(request, catalog);
+	SetCatalogId(request, options);
 	request.SetDatabaseInput(input);
-	auto outcome = client->CreateDatabase(request);
+	auto outcome = client.CreateDatabase(request);
 	if (!outcome.IsSuccess()) {
 		if (IsAlreadyExists(outcome)) {
 			return GlueCreateOutcome::ALREADY_EXISTED;
@@ -87,6 +117,22 @@ GlueCreateOutcome GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &c
 		ThrowGlueError(outcome, StringUtil::Format("CreateDatabase '%s'", database.name));
 	}
 	return GlueCreateOutcome::CREATED;
+}
+
+GlueCreateOutcome GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &catalog,
+                                          const GlueDatabaseInfo &database) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	CheckWritable(catalog, "CreateDatabase");
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	return PutDatabase(*client, catalog.options, database);
+}
+
+GlueCreateOutcome GlueAPI::CreateDatabase(ClientContext &context, const GlueAttachOptions &options,
+                                          const GlueDatabaseInfo &database) {
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, options);
+	return PutDatabase(*client, options, database);
 }
 
 void GlueAPI::UpdateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database) {
@@ -136,21 +182,31 @@ void GlueAPI::UpdateDatabase(ClientContext &context, GlueCatalog &catalog, const
 	}
 }
 
-void GlueAPI::DeleteDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
-	CheckWritable(catalog, "DeleteDatabase");
-	GlueHttpClientContextScope http_scope(context);
-	auto client = GetClient(context, catalog);
+static void DropDatabase(Aws::Glue::GlueClient &client, const GlueAttachOptions &options, const string &database_name) {
 	Aws::Glue::Model::DeleteDatabaseRequest request;
-	SetCatalogId(request, catalog);
+	SetCatalogId(request, options);
 	request.SetName(database_name);
-	auto outcome = client->DeleteDatabase(request);
+	auto outcome = client.DeleteDatabase(request);
 	if (!outcome.IsSuccess()) {
 		if (IsEntityNotFound(outcome)) {
 			throw CatalogException("Glue database with name \"%s\" does not exist", database_name);
 		}
 		ThrowGlueError(outcome, StringUtil::Format("DeleteDatabase '%s'", database_name));
 	}
+}
+
+void GlueAPI::DeleteDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	CheckWritable(catalog, "DeleteDatabase");
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	DropDatabase(*client, catalog.options, database_name);
+}
+
+void GlueAPI::DeleteDatabase(ClientContext &context, const GlueAttachOptions &options, const string &database_name) {
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, options);
+	DropDatabase(*client, options, database_name);
 }
 
 } // namespace duckdb

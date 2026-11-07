@@ -54,6 +54,15 @@ public:
 
 	//! List all databases of the catalog
 	static vector<GlueDatabaseInfo> GetDatabases(ClientContext &context, GlueCatalog &catalog);
+	static vector<GlueDatabaseInfo> GetDatabases(ClientContext &context, const GlueAttachOptions &options);
+	//! Fetch a single database of the catalog 'options' name, false if it does not exist
+	static bool GetDatabase(ClientContext &context, const GlueAttachOptions &options, const string &database_name,
+	                        GlueDatabaseInfo &result);
+	//! Create a database in that catalog: a resource link when 'database.target_database' is set
+	static GlueCreateOutcome CreateDatabase(ClientContext &context, const GlueAttachOptions &options,
+	                                        const GlueDatabaseInfo &database);
+	//! Delete a database of that catalog (a link: the link alone); throws a CatalogException if it does not exist
+	static void DeleteDatabase(ClientContext &context, const GlueAttachOptions &options, const string &database_name);
 	//! Fetch a single database, returns false if it does not exist. 'raw_json' (optional) receives the Glue Database
 	//! object of the response as JSON.
 	static bool GetDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name,

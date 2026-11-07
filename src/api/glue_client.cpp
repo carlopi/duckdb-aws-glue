@@ -210,6 +210,7 @@ static GlueCatalogNodeInfo ToCatalogNodeInfo(const Aws::Glue::Model::Catalog &ca
 	info.description = ToStdString(catalog.GetDescription());
 	if (catalog.FederatedCatalogHasBeenSet()) {
 		info.kind = "federated";
+		info.connection_type = ToStdString(catalog.GetFederatedCatalog().GetConnectionType());
 	} else if (catalog.TargetRedshiftCatalogHasBeenSet()) {
 		info.kind = "redshift";
 	} else {

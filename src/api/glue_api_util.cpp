@@ -34,6 +34,12 @@ GlueDatabaseInfo ToDatabaseInfo(const Aws::Glue::Model::Database &database) {
 		result.catalog_id = ToStdString(database.GetCatalogId());
 	}
 	result.is_resource_link = database.TargetDatabaseHasBeenSet();
+	if (result.is_resource_link) {
+		auto &target = database.GetTargetDatabase();
+		result.target_catalog_id = ToStdString(target.GetCatalogId());
+		result.target_database = ToStdString(target.GetDatabaseName());
+		result.target_region = ToStdString(target.GetRegion());
+	}
 	result.name = ToStdString(database.GetName());
 	result.description = ToStdString(database.GetDescription());
 	result.location_uri = ToStdString(database.GetLocationUri());

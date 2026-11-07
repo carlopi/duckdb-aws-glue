@@ -509,33 +509,49 @@ FROM duckdb_logs_parsed('GlueScan');
 
 ## External resources
 
-The extension registers the external resource type `aws:glue:catalog`: a node of the account's catalog tree, the
-default catalog or a catalog under it (native, federated from Redshift or S3 Tables, or a managed Redshift catalog).
-A handle is the catalog's ARN, with the `endpoint` and `secret` given when it was created or listed:
+The extension registers the external resource type `aws:glue`: a node of the account's catalog tree, the root catalog
+of a region or a catalog under it (federated from S3 Tables or Redshift, or a managed Redshift catalog), or a database
+of such a node, a database of its own or a resource link to a database elsewhere. The handle is the ARN, which tells
+the two apart, with the `endpoint` and `secret` given when it was created or listed:
 
 ```sql
-SHOW ALL EXTERNAL RESOURCES;                      -- every node of the tree, ARN as the reference
-REGISTER EXTERNAL RESOURCE 'aws:glue:catalog' AS prod
-    FROM MAP {'arn': 'arn:aws:glue:eu-central-1:123456789012:catalog'};
+SHOW ALL EXTERNAL RESOURCES;                      -- every node of every region's tree, and the root's databases
+REGISTER EXTERNAL RESOURCE 'aws:glue' AS prod FROM MAP {'arn': 'arn:aws:glue:eu-central-1:123456789012:catalog'};
 ATTACH TO EXTERNAL RESOURCE prod AS g (DEFAULT_SCHEMA 'sales');
-CREATE EXTERNAL RESOURCE 'aws:glue:catalog' AS virginia (REGION 'us-east-1');       -- the root catalog there
-ATTACH TO NEW TEMPORARY EXTERNAL RESOURCE 'aws:glue:catalog' (REGION 'us-east-1') AS v;
-CREATE EXTERNAL RESOURCE 'aws:glue:catalog' AS shared
-    (PATH 'shared', CONNECTION 'my-connection', IDENTIFIER 'arn:aws:...');       -- a federated catalog
-DESTROY EXTERNAL RESOURCE shared;
+CREATE EXTERNAL RESOURCE 'aws:glue' AS virginia (REGION 'us-east-1');                 -- the root catalog there
+CREATE EXTERNAL RESOURCE 'aws:glue' AS scratch
+    (DATABASE 'scratch', LOCATION 's3://my-bucket/scratch/', CATALOG 'prod');          -- a database of prod
+ATTACH TO NEW TEMPORARY EXTERNAL RESOURCE 'aws:glue'
+    (DATABASE 'tmp', LOCATION 's3://my-bucket/tmp/') AS t;                             -- deleted on DETACH
+CREATE EXTERNAL RESOURCE 'aws:glue' AS theirs                                          -- a resource link
+    (DATABASE 'theirs', TARGET 'arn:aws:glue:eu-central-1:999999999999:database/sales');
+CREATE EXTERNAL RESOURCE 'aws:glue' AS shared
+    (PATH 'shared', CONNECTION 'my-connection', IDENTIFIER 'arn:aws:...');             -- a federated catalog
+DESTROY EXTERNAL RESOURCE theirs;
 ```
 
-The listing is GetCatalogs with the credentials of the default secret; where Glue has no catalogs API (moto) or
-refuses it, it is the default catalog alone, found as the catalog of its databases. A catalog tree is per region:
-without `region` the default-enabled commercial regions are swept in parallel and a region that refuses is left out,
-with `region` that one is listed and its errors thrown. Status lists one page of the
-catalog's databases to tell it exists, and hands ATTACH the ARN as the path, `glue` as the type and the handle's
-`endpoint` and `secret` as options. Create without `path` is the root catalog of `region`, which exists in every region: nothing is created, and
-destroying it does nothing (`kept`). Glue creates no native catalog below the root, so create with `path` (a nested
-`a/b/c` needs `a/b` to exist) is CreateCatalog of a federated catalog, `connection` and `identifier` naming its
-source, or of a Redshift-managed one, `redshift_catalog_arn`; also `description`, `endpoint` and `secret`. The
-catalog is marked with the parameter `duckdb-external-resource-type`. Destroy is DeleteCatalog of the catalogs under
-the node, deepest first, then of the node. The tables of a federated or managed catalog are not Hive
+**List** walks each region's tree with GetCatalogs and lists the databases of its root with GetDatabases; where Glue
+has no catalogs API (moto) or refuses it, the root alone stands for the tree. Without `region` the default-enabled
+commercial regions are swept in parallel and a region that refuses is left out; with `region` that one is listed and
+its errors thrown; with `catalog` (an ARN, the name of a registered `aws:glue` resource or a catalog id) the databases
+of that catalog. The metadata of a row says its `kind` (catalog or database) and `type`: `native`,
+`federated:<connection type>` or `redshift` for a catalog, `native` or `link` with the `target` ARN for a database,
+plus the `location` of a database.
+
+**Status** lists one page of a catalog's databases, or fetches the database, and hands ATTACH the ARN as the path (a
+database ARN attaches its catalog with the database as the default schema), `glue` as the type and the handle's
+`endpoint` and `secret` as options.
+
+**Create** without `path` or `database` is the root catalog of `region`, which exists in every region: nothing is
+created, and destroying it does nothing (`kept`). Glue creates no native catalog below the root, so `path` (a nested
+`a/b/c` needs `a/b` to exist) is CreateCatalog of a federated catalog, `connection` and `identifier` naming its source,
+or of a Redshift-managed one, `redshift_catalog_arn`. `database` is CreateDatabase in the catalog `catalog` names
+(default: the root of the region): with `target`, the ARN of a database in any catalog, account or region, a resource
+link to it, otherwise a database of its own, with `location` for the files of its tables. Also `description`,
+`endpoint` and `secret`. What is created is marked with the parameter `duckdb-external-resource-type`.
+
+**Destroy** is DeleteDatabase of a database (its tables with it; of a link, the link alone) or DeleteCatalog of the
+catalogs under a node, deepest first, then of the node. The tables of a federated or managed catalog are not Hive
 tables, so the extension lists but cannot scan them. All callbacks default `region` to the region of the secret.
 
 ## Testing

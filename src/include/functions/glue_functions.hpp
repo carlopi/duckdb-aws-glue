@@ -82,10 +82,10 @@ TableFunction GetGlueAlterTableFunction();
 //! with the schema and the partitions (values and locations) given as arguments.
 TableFunctionSet GetHiveScanFunction(DatabaseInstance &db);
 
-//! The external resource type 'aws:glue:catalog' (a node of the account's catalog tree) and its callbacks:
-//! __glue__catalog__create(params) makes a catalog, __glue__catalog__status(handle) checks one and gives what ATTACH
-//! takes, __glue__catalog__destroy(handle) deletes one with its subtree and __glue__catalog__list(params) lists the
-//! tree, for SHOW ALL EXTERNAL RESOURCES
-void RegisterGlueCatalogResource(ExtensionLoader &loader);
+//! The external resource type 'aws:glue': a node of the account's catalog tree or a database of one, told apart by
+//! the ARN in the handle. __glue__create(params) makes a catalog, a database or a resource link, __glue__status(handle)
+//! checks one and gives what ATTACH takes, __glue__destroy(handle) deletes one (a catalog with its subtree) and
+//! __glue__list(params) lists the tree and the root's databases, for SHOW ALL EXTERNAL RESOURCES
+void RegisterGlueResource(ExtensionLoader &loader);
 
 } // namespace duckdb

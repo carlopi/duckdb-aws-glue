@@ -41,6 +41,10 @@ struct GlueDatabaseInfo {
 	string catalog_id;
 	//! a Glue resource link (TargetDatabase set): a database of another catalog
 	bool is_resource_link = false;
+	//! The database a resource link points at: its catalog id, name and region (empty: the link's own region)
+	string target_catalog_id;
+	string target_database;
+	string target_region;
 	string name;
 	string description;
 	//! Optional S3 location tables of this database default to
@@ -58,6 +62,8 @@ struct GlueCatalogNodeInfo {
 	string description;
 	//! 'native', 'federated' (metadata held by another service) or 'redshift' (a managed Redshift catalog)
 	string kind;
+	//! The connection type of a federated catalog, e.g. 'aws:s3tables' or 'aws:redshift'
+	string connection_type;
 	unordered_map<string, string> parameters;
 };
 

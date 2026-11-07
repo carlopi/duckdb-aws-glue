@@ -10,6 +10,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/external_resource_type_registry.hpp"
+#include "duckdb/main/external_resources_manager.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/parallel/task_executor.hpp"
 
@@ -17,9 +18,9 @@
 
 namespace duckdb {
 
-//! The external resource type: a node of the account's catalog tree. Also stamped as a parameter on every catalog
-//! the create callback makes, so a catalog carries its own provenance.
-static constexpr const char *GLUE_CATALOG_TYPE = "aws:glue:catalog";
+//! The external resource type: a node of the account's catalog tree, or a database of one. Also stamped as a
+//! parameter on every catalog and database the create callback makes, so they carry their own provenance.
+static constexpr const char *GLUE_TYPE = "aws:glue";
 static constexpr const char *RESOURCE_TYPE_PARAMETER = "duckdb-external-resource-type";
 
 namespace {
@@ -63,7 +64,7 @@ Value MapOf(vector<Value> keys, vector<Value> values) {
 GlueAttachOptions OptionsOf(ClientContext &context, const Value &input, const string &catalog_id,
                             const string &region = string()) {
 	GlueAttachOptions options;
-	options.name = GLUE_CATALOG_TYPE;
+	options.name = GLUE_TYPE;
 	options.path = catalog_id.empty() ? ":" : catalog_id;
 	options.catalog_id = catalog_id;
 	options.secret_name = StringUtil::Lower(MapLookup(input, "secret"));
@@ -76,7 +77,7 @@ GlueAttachOptions OptionsOf(ClientContext &context, const Value &input, const st
 		auto region = kv_secret.TryGetValue("region");
 		if (region.IsNull()) {
 			throw InvalidConfigurationException("%s: secret '%s' does not have a region, provide one with 'region'",
-			                                    GLUE_CATALOG_TYPE, secret_entry->secret->GetName().GetIdentifierName());
+			                                    GLUE_TYPE, secret_entry->secret->GetName().GetIdentifierName());
 		}
 		options.region = region.ToString();
 	}
@@ -98,7 +99,7 @@ Value HandleOf(const string &arn, const Value &params) {
 	return MapOf(std::move(keys), std::move(values));
 }
 
-//! The catalog a handle names
+//! The catalog or database a handle names
 GlueArn HandleArn(const Value &handle, const char *callback) {
 	auto arn = MapLookup(handle, "arn");
 	if (arn.empty()) {
@@ -112,9 +113,67 @@ string ArnOf(const GlueCatalogNodeInfo &node, const string &region) {
 	return node.resource_arn.empty() ? CatalogArn(region, node.catalog_id) : node.resource_arn;
 }
 
+//! What a catalog node is: 'native', 'federated:<connection type>' or 'redshift'
+string KindOf(const GlueCatalogNodeInfo &node) {
+	if (node.kind == "federated" && !node.connection_type.empty()) {
+		return node.kind + ":" + node.connection_type;
+	}
+	return node.kind;
+}
+
 Value MetadataOf(const GlueCatalogNodeInfo &node) {
-	return MapOf({Value("catalog_id"), Value("type"), Value("description")},
-	             {Value(node.catalog_id), Value(node.kind), Value(node.description)});
+	return MapOf({Value("kind"), Value("type"), Value("catalog_id"), Value("description")},
+	             {Value("catalog"), Value(KindOf(node)), Value(node.catalog_id), Value(node.description)});
+}
+
+//! The ARN of the database a resource link points at; its region is the link's when it names none
+string TargetArnOf(const GlueDatabaseInfo &database, const string &region) {
+	return DatabaseArn(database.target_region.empty() ? region : database.target_region, database.target_catalog_id,
+	                   database.target_database);
+}
+
+Value MetadataOf(const GlueDatabaseInfo &database, const string &region) {
+	return MapOf({Value("kind"), Value("type"), Value("target"), Value("location"), Value("description")},
+	             {Value("database"), Value(database.is_resource_link ? "link" : "native"),
+	              Value(database.is_resource_link ? TargetArnOf(database, region) : string()),
+	              Value(database.location_uri), Value(database.description)});
+}
+
+//! The catalog the 'catalog' param names: an ARN, the name of a registered aws:glue resource, or a Glue catalog id;
+//! without it the root catalog of the region
+GlueArn CatalogParam(ClientContext &context, const Value &params, const string &region) {
+	auto catalog = MapLookup(params, "catalog");
+	GlueArn result;
+	result.region = region;
+	if (catalog.empty()) {
+		return result;
+	}
+	if (!IsArn(catalog)) {
+		auto registered = ExternalResourcesManager::Get(context).Lookup(catalog);
+		if (registered) {
+			if (registered->type != GLUE_TYPE) {
+				throw InvalidInputException("%s: the registered resource '%s' is of type '%s', not a Glue catalog",
+				                            GLUE_TYPE, catalog, registered->type);
+			}
+			catalog = MapLookup(registered->handle, "arn");
+		} else {
+			// a Glue catalog id starts with the account: '<account id>' or '<account id>:<catalog>/<nested>'
+			auto account_id = catalog.substr(0, catalog.find(':'));
+			if (account_id.size() != 12 ||
+			    !std::all_of(account_id.begin(), account_id.end(), StringUtil::CharacterIsDigit)) {
+				throw InvalidInputException("%s: 'catalog' must be a catalog ARN, the name of a registered resource "
+				                            "or a Glue catalog id starting with the account id ('%s')",
+				                            GLUE_TYPE, catalog);
+			}
+			result.catalog_id = catalog;
+			return result;
+		}
+	}
+	result = ParseGlueArn(catalog);
+	if (!result.database.empty()) {
+		throw InvalidInputException("%s: 'catalog' names a database, not a catalog ('%s')", GLUE_TYPE, catalog);
+	}
+	return result;
 }
 
 void EmitRows(ResourceState &state, DataChunk &output) {
@@ -132,11 +191,13 @@ void EmitRows(ResourceState &state, DataChunk &output) {
 //===--------------------------------------------------------------------===//
 // create(params MAP) -> TABLE(handle MAP)
 //
-// Without 'path' the root catalog of 'region' (default: the region of the secret), which exists in every region and
-// is only resolved, never created. With 'path' a catalog under the root, which Glue only creates as a federated one,
-// 'connection' and 'identifier' naming its source, or a Redshift-managed one, 'redshift_catalog_arn'; a nested
-// 'a/b/c' needs 'a/b' to exist. CreateCatalog is synchronous, so the handle is of a catalog that already exists.
-// Also 'description', 'endpoint' and 'secret'.
+// Without 'path' or 'database' the root catalog of 'region' (default: the region of the secret), which exists in
+// every region and is only resolved, never created. With 'path' a catalog under the root, which Glue only creates as
+// a federated one, 'connection' and 'identifier' naming its source, or a Redshift-managed one, 'redshift_catalog_arn';
+// a nested 'a/b/c' needs 'a/b' to exist. With 'database' a database in the catalog 'catalog' names (default: the
+// root): with 'target', the ARN of a database anywhere, a resource link to it, else a database of its own, with
+// 'location' for the files of its tables. CreateCatalog and CreateDatabase are synchronous, so the handle is of
+// something that already exists. Also 'description', 'endpoint' and 'secret'.
 //===--------------------------------------------------------------------===//
 
 unique_ptr<FunctionData> CreateBind(ClientContext &, TableFunctionBindInput &input, vector<LogicalType> &return_types,
@@ -163,9 +224,41 @@ string RootCatalogId(ClientContext &context, const GlueAttachOptions &root) {
 	if (reported.empty()) {
 		throw IOException("%s create: the account id of the root catalog in region '%s' can not be told: it has "
 		                  "no databases yet and the catalogs API is unavailable",
-		                  GLUE_CATALOG_TYPE, root.region);
+		                  GLUE_TYPE, root.region);
 	}
 	return reported;
+}
+
+//! A database, or a resource link to the database 'target' names, in the catalog 'catalog' names
+Value CreateDatabase(ClientContext &context, const Value &params, const GlueAttachOptions &root,
+                     const string &database) {
+	auto catalog = CatalogParam(context, params, root.region);
+	auto catalog_id = catalog.catalog_id.empty() ? RootCatalogId(context, root) : catalog.catalog_id;
+	auto options = OptionsOf(context, params, catalog_id, catalog.region);
+
+	GlueDatabaseInfo input;
+	input.name = database;
+	input.description = MapLookup(params, "description");
+	input.location_uri = MapLookup(params, "location");
+	input.parameters[RESOURCE_TYPE_PARAMETER] = GLUE_TYPE;
+	auto target = MapLookup(params, "target");
+	if (!target.empty()) {
+		if (!input.location_uri.empty()) {
+			throw InvalidInputException("%s create: a resource link has no 'location' of its own", GLUE_TYPE);
+		}
+		auto target_arn = ParseGlueArn(target);
+		if (target_arn.database.empty()) {
+			throw InvalidInputException("%s create: 'target' must be the ARN of a database ('%s')", GLUE_TYPE, target);
+		}
+		input.target_catalog_id = target_arn.catalog_id;
+		input.target_database = target_arn.database;
+		input.target_region = target_arn.region;
+	}
+	if (GlueAPI::CreateDatabase(context, options, input) == GlueCreateOutcome::ALREADY_EXISTED) {
+		throw InvalidInputException("%s create: database '%s' already exists in catalog '%s'", GLUE_TYPE, database,
+		                            catalog_id);
+	}
+	return HandleOf(DatabaseArn(options.region, catalog_id, database), params);
 }
 
 void CreateFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
@@ -175,6 +268,16 @@ void CreateFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
 		state.ran = true;
 		auto root = OptionsOf(context, bind.input, string());
 		auto path = MapLookup(bind.input, "path");
+		auto database = MapLookup(bind.input, "database");
+		if (!path.empty() && !database.empty()) {
+			throw InvalidInputException("%s create: give 'path' for a catalog or 'database' for a database, not both",
+			                            GLUE_TYPE);
+		}
+		if (!database.empty()) {
+			state.rows.push_back({CreateDatabase(context, bind.input, root, database)});
+			EmitRows(state, output);
+			return;
+		}
 		if (path.empty()) {
 			state.rows.push_back({HandleOf(CatalogArn(root.region, RootCatalogId(context, root)), bind.input)});
 			EmitRows(state, output);
@@ -184,7 +287,7 @@ void CreateFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
 		GlueCatalogInput input;
 		input.name = path;
 		input.description = MapLookup(bind.input, "description");
-		input.parameters[RESOURCE_TYPE_PARAMETER] = GLUE_CATALOG_TYPE;
+		input.parameters[RESOURCE_TYPE_PARAMETER] = GLUE_TYPE;
 		input.connection_name = MapLookup(bind.input, "connection");
 		input.connection_type = MapLookup(bind.input, "connection_type");
 		input.identifier = MapLookup(bind.input, "identifier");
@@ -194,11 +297,11 @@ void CreateFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
 			throw InvalidInputException("%s create: Glue creates no native catalog below the root: give 'connection' "
 			                            "and 'identifier' for a federated catalog or 'redshift_catalog_arn' for a "
 			                            "Redshift-managed one, or no 'path' for the root catalog of the region",
-			                            GLUE_CATALOG_TYPE);
+			                            GLUE_TYPE);
 		}
 		if (input.connection_name.empty() != input.identifier.empty()) {
 			throw InvalidInputException("%s create: a federated catalog needs both 'connection' and 'identifier'",
-			                            GLUE_CATALOG_TYPE);
+			                            GLUE_TYPE);
 		}
 		// a nested catalog goes under a catalog that exists; Glue wants its id qualified with the account
 		auto account_id = RootCatalogId(context, root);
@@ -209,8 +312,8 @@ void CreateFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
 			if (parent.empty() ||
 			    !GlueAPI::GetCatalog(context, OptionsOf(context, bind.input, account_id + ":" + parent, root.region),
 			                         parent_node)) {
-				throw InvalidInputException("%s create: the parent catalog '%s' of '%s' does not exist",
-				                            GLUE_CATALOG_TYPE, parent, path);
+				throw InvalidInputException("%s create: the parent catalog '%s' of '%s' does not exist", GLUE_TYPE,
+				                            parent, path);
 			}
 		}
 		GlueAPI::CreateCatalog(context, root, input);
@@ -218,7 +321,7 @@ void CreateFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
 		// the handle is the ARN, which Glue reports for the created catalog
 		GlueCatalogNodeInfo node;
 		if (!GlueAPI::GetCatalog(context, OptionsOf(context, bind.input, account_id + ":" + path, root.region), node)) {
-			throw IOException("%s create: catalog '%s' is not found after CreateCatalog", GLUE_CATALOG_TYPE, path);
+			throw IOException("%s create: catalog '%s' is not found after CreateCatalog", GLUE_TYPE, path);
 		}
 		state.rows.push_back({HandleOf(ArnOf(node, root.region), bind.input)});
 	}
@@ -228,10 +331,11 @@ void CreateFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
 //===--------------------------------------------------------------------===//
 // status(handle MAP) -> TABLE(state VARCHAR, result MAP)
 //
-// A catalog exists or it does not, so one call that lists its databases decides 'ready'; the call fails with Glue's
-// error otherwise. REGISTER EXTERNAL RESOURCE resolves a user-supplied handle through here, so a bad ARN fails now
-// rather than at the first query. The result is what ATTACH takes: the ARN as the path, 'glue' as the type, and the
-// endpoint and secret of the handle as options.
+// A catalog or a database exists or it does not, so one call decides 'ready': one page of a catalog's databases, or
+// the database itself; the call fails with Glue's error otherwise. REGISTER EXTERNAL RESOURCE resolves a user-supplied
+// handle through here, so a bad ARN fails now rather than at the first query. The result is what ATTACH takes: the
+// ARN as the path (a database ARN attaches its catalog with the database as the default schema), 'glue' as the type,
+// and the endpoint and secret of the handle as options.
 //===--------------------------------------------------------------------===//
 
 unique_ptr<FunctionData> StatusBind(ClientContext &, TableFunctionBindInput &input, vector<LogicalType> &return_types,
@@ -250,9 +354,17 @@ void StatusFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
 	auto &bind = data_p.bind_data->Cast<ResourceBindData>();
 	if (!state.ran) {
 		state.ran = true;
-		auto arn = HandleArn(bind.input, "aws:glue:catalog status");
+		auto arn = HandleArn(bind.input, "aws:glue status");
 		auto options = OptionsOf(context, bind.input, arn.catalog_id, arn.region);
-		GlueAPI::GetReportedCatalogId(context, options);
+		if (arn.database.empty()) {
+			GlueAPI::GetReportedCatalogId(context, options);
+		} else {
+			GlueDatabaseInfo database;
+			if (!GlueAPI::GetDatabase(context, options, arn.database, database)) {
+				throw InvalidInputException("%s status: database '%s' does not exist in catalog '%s'", GLUE_TYPE,
+				                            arn.database, arn.catalog_id);
+			}
+		}
 
 		vector<Value> keys {Value("uri"), Value("attached_db_type")};
 		vector<Value> values {Value(MapLookup(bind.input, "arn")), Value("glue")};
@@ -271,8 +383,9 @@ void StatusFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
 //===--------------------------------------------------------------------===//
 // destroy(handle MAP) -> TABLE(status VARCHAR)
 //
-// DeleteCatalog on the catalog the handle names, after the catalogs under it, deepest first. The root catalog of a
-// region exists whether or not anything refers to it, so destroying it does nothing and reports 'kept'.
+// DeleteDatabase on the database the handle names (a resource link: the link alone, its target is untouched), or
+// DeleteCatalog on the catalog it names, after the catalogs under it, deepest first. The root catalog of a region
+// exists whether or not anything refers to it, so destroying it does nothing and reports 'kept'.
 //===--------------------------------------------------------------------===//
 
 unique_ptr<FunctionData> DestroyBind(ClientContext &, TableFunctionBindInput &input, vector<LogicalType> &return_types,
@@ -289,7 +402,13 @@ void DestroyFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &o
 	auto &bind = data_p.bind_data->Cast<ResourceBindData>();
 	if (!state.ran) {
 		state.ran = true;
-		auto arn = HandleArn(bind.input, "aws:glue:catalog destroy");
+		auto arn = HandleArn(bind.input, "aws:glue destroy");
+		if (!arn.database.empty()) {
+			GlueAPI::DeleteDatabase(context, OptionsOf(context, bind.input, arn.catalog_id, arn.region), arn.database);
+			state.rows.push_back({Value("deleted")});
+			EmitRows(state, output);
+			return;
+		}
 		if (arn.catalog_id == arn.account_id) {
 			state.rows.push_back({Value("kept")});
 			EmitRows(state, output);
@@ -313,11 +432,12 @@ void DestroyFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &o
 //===--------------------------------------------------------------------===//
 // list(params MAP) -> TABLE(handle MAP, name VARCHAR, reference VARCHAR, state VARCHAR, metadata MAP)
 //
-// Every node of the catalog tree: the default catalog and the catalogs under it, native, federated or managed. Where
-// Glue has no catalogs API (a local server) or refuses it, the default catalog alone, found as the catalog of its
-// databases. A catalog tree is per region: 'region' lists that one, its errors thrown; without it the default
-// regions are swept in parallel, as the aws extension lists table buckets, and a region that refuses (not enabled
-// for the account, no permission) is left out.
+// Every node of the catalog tree, the default catalog and the catalogs under it, native, federated or managed, and
+// the databases of the root, native ones and resource links; the databases inside the other nodes are the nodes' own
+// structure and are listed with 'catalog' naming the node. Where Glue has no catalogs API (a local server) or refuses
+// it, the root alone stands for the tree. A catalog tree is per region: 'region' lists that one, its errors thrown;
+// without it the default regions are swept in parallel, as the aws extension lists table buckets, and a region that
+// refuses (not enabled for the account, no permission) is left out.
 //===--------------------------------------------------------------------===//
 
 //! The regions a sweep covers: the default-enabled commercial regions, the list the aws extension sweeps
@@ -329,41 +449,56 @@ const vector<string> &DefaultAwsRegions() {
 	return regions;
 }
 
-//! The nodes of one region's tree, or its root alone where the catalogs API is unavailable; empty when the region
-//! refuses, unless 'rethrow'
-vector<GlueCatalogNodeInfo> RegionNodes(ClientContext &context, const GlueAttachOptions &options, bool rethrow) {
+//! What one region's tree lists: its nodes and the databases of its root, or of the one catalog asked for
+struct RegionListing {
+	vector<GlueCatalogNodeInfo> nodes;
+	vector<GlueDatabaseInfo> databases;
+};
+
+//! The listing of one region, or of one catalog of it ('catalog_only'); empty when the region refuses, unless 'rethrow'
+RegionListing RegionNodes(ClientContext &context, const GlueAttachOptions &options, bool catalog_only, bool rethrow) {
+	RegionListing result;
 	try {
+		if (catalog_only) {
+			result.databases = GlueAPI::GetDatabases(context, options);
+			return result;
+		}
+		// the databases first: where the catalogs API is unavailable, they are also what tells the root's id
+		result.databases = GlueAPI::GetDatabases(context, options);
 		try {
-			return GlueAPI::GetCatalogs(context, options);
+			result.nodes = GlueAPI::GetCatalogs(context, options);
 		} catch (GlueException &) {
-			vector<GlueCatalogNodeInfo> nodes;
 			GlueCatalogNodeInfo root;
-			root.catalog_id = GlueAPI::GetReportedCatalogId(context, options);
+			for (auto &database : result.databases) {
+				if (!database.is_resource_link && !database.catalog_id.empty()) {
+					root.catalog_id = database.catalog_id;
+					break;
+				}
+			}
 			if (!root.catalog_id.empty()) {
 				root.name = root.catalog_id;
 				root.kind = "native";
-				nodes.push_back(std::move(root));
+				result.nodes.push_back(std::move(root));
 			}
-			return nodes;
 		}
 	} catch (std::exception &) {
 		if (rethrow) {
 			throw;
 		}
-		return {};
+		return RegionListing();
 	}
+	return result;
 }
 
 class ListRegionTask : public BaseExecutorTask {
 public:
-	ListRegionTask(TaskExecutor &executor, ClientContext &context, GlueAttachOptions options,
-	               vector<GlueCatalogNodeInfo> &result)
+	ListRegionTask(TaskExecutor &executor, ClientContext &context, GlueAttachOptions options, RegionListing &result)
 	    : BaseExecutorTask(executor), context(context), options(std::move(options)), result(result) {
 	}
 
 	void ExecuteTask() override {
 		GlueHttpClientContextScope http_scope(context);
-		result = RegionNodes(context, options, false);
+		result = RegionNodes(context, options, false, false);
 	}
 	string TaskType() const override {
 		return "ListRegionTask";
@@ -372,7 +507,7 @@ public:
 private:
 	ClientContext &context;
 	GlueAttachOptions options;
-	vector<GlueCatalogNodeInfo> &result;
+	RegionListing &result;
 };
 
 unique_ptr<FunctionData> ListBind(ClientContext &, TableFunctionBindInput &input, vector<LogicalType> &return_types,
@@ -401,23 +536,52 @@ void ListFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &outp
 		// a sweep leaves out the regions that refuse, so what is wrong for every region is checked first
 		GlueCatalog::GetStorageSecret(context, StringUtil::Lower(MapLookup(bind.input, "secret")));
 		auto region = MapLookup(bind.input, "region");
+		auto catalog = CatalogParam(context, bind.input, region);
+		if (!catalog.catalog_id.empty()) {
+			// the databases of one catalog: its region when it is an ARN's, else the one asked for
+			auto options = OptionsOf(context, bind.input, catalog.catalog_id, catalog.region);
+			auto listing = RegionNodes(context, options, true, true);
+			for (auto &database : listing.databases) {
+				auto arn = DatabaseArn(options.region, catalog.catalog_id, database.name);
+				state.rows.push_back({HandleOf(arn, bind.input), Value(database.name), Value(arn), Value("ready"),
+				                      MetadataOf(database, options.region)});
+			}
+			EmitRows(state, output);
+			return;
+		}
 		auto regions = region.empty() ? DefaultAwsRegions() : vector<string> {region};
-		vector<vector<GlueCatalogNodeInfo>> nodes(regions.size());
+		vector<RegionListing> listings(regions.size());
 		if (regions.size() == 1) {
-			nodes[0] = RegionNodes(context, OptionsOf(context, bind.input, string(), regions[0]), true);
+			listings[0] = RegionNodes(context, OptionsOf(context, bind.input, string(), regions[0]), false, true);
 		} else {
 			TaskExecutor executor(context, TaskSchedulerType::ASYNC);
 			for (idx_t i = 0; i < regions.size(); i++) {
 				executor.ScheduleTask(make_uniq<ListRegionTask>(
-				    executor, context, OptionsOf(context, bind.input, string(), regions[i]), nodes[i]));
+				    executor, context, OptionsOf(context, bind.input, string(), regions[i]), listings[i]));
 			}
 			executor.WorkOnTasks();
 		}
 		for (idx_t i = 0; i < regions.size(); i++) {
-			for (auto &node : nodes[i]) {
+			auto &listing = listings[i];
+			for (auto &node : listing.nodes) {
 				auto arn = ArnOf(node, regions[i]);
 				state.rows.push_back(
 				    {HandleOf(arn, bind.input), Value(node.name), Value(arn), Value("ready"), MetadataOf(node)});
+			}
+			// the root's databases, under the root's id; a region without a known root lists none
+			string root_id;
+			for (auto &node : listing.nodes) {
+				if (node.catalog_id.find(':') == string::npos) {
+					root_id = node.catalog_id;
+				}
+			}
+			if (root_id.empty()) {
+				continue;
+			}
+			for (auto &database : listing.databases) {
+				auto arn = DatabaseArn(regions[i], root_id, database.name);
+				state.rows.push_back({HandleOf(arn, bind.input), Value(database.name), Value(arn), Value("ready"),
+				                      MetadataOf(database, regions[i])});
 			}
 		}
 	}
@@ -426,20 +590,20 @@ void ListFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &outp
 
 } // namespace
 
-void RegisterGlueCatalogResource(ExtensionLoader &loader) {
+void RegisterGlueResource(ExtensionLoader &loader) {
 	auto map_vv = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
-	loader.RegisterFunction(TableFunction("__glue__catalog__create", {map_vv}, CreateFun, CreateBind, ResourceInit));
-	loader.RegisterFunction(TableFunction("__glue__catalog__status", {map_vv}, StatusFun, StatusBind, ResourceInit));
-	loader.RegisterFunction(TableFunction("__glue__catalog__destroy", {map_vv}, DestroyFun, DestroyBind, ResourceInit));
-	loader.RegisterFunction(TableFunction("__glue__catalog__list", {map_vv}, ListFun, ListBind, ResourceInit));
+	loader.RegisterFunction(TableFunction("__glue__create", {map_vv}, CreateFun, CreateBind, ResourceInit));
+	loader.RegisterFunction(TableFunction("__glue__status", {map_vv}, StatusFun, StatusBind, ResourceInit));
+	loader.RegisterFunction(TableFunction("__glue__destroy", {map_vv}, DestroyFun, DestroyBind, ResourceInit));
+	loader.RegisterFunction(TableFunction("__glue__list", {map_vv}, ListFun, ListBind, ResourceInit));
 
 	ExternalResourceType type;
-	type.name = GLUE_CATALOG_TYPE;
+	type.name = GLUE_TYPE;
 	type.kind = "catalog";
-	type.create_function = "__glue__catalog__create";
-	type.status_function = "__glue__catalog__status";
-	type.destroy_function = "__glue__catalog__destroy";
-	type.list_function = "__glue__catalog__list";
+	type.create_function = "__glue__create";
+	type.status_function = "__glue__status";
+	type.destroy_function = "__glue__destroy";
+	type.list_function = "__glue__list";
 	type.origin = "extension";
 	ExternalResourceTypeRegistry::Get(loader.GetDatabaseInstance()).Add(std::move(type));
 }
