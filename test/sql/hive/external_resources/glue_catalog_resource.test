@@ -65,9 +65,9 @@ SELECT * FROM __glue__catalog__status(MAP {'endpoint': '{GLUE_ENDPOINT}'});
 handle is missing 'arn'
 
 statement error
-SELECT * FROM __glue__catalog__status(MAP {'arn': 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:database/default'});
+SELECT * FROM __glue__catalog__status(MAP {'arn': 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:table/default/t'});
 ----
-is not a catalog ARN
+is not a catalog or database ARN
 
 # REGISTER resolves the handle through status; ATTACH TO EXTERNAL RESOURCE then attaches the catalog
 statement ok

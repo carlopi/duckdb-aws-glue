@@ -52,6 +52,9 @@ unique_ptr<Catalog> GlueAttach::Attach(optional_ptr<StorageExtensionInfo> storag
 		auto arn = ParseGlueArn(info.path);
 		attach_options.catalog_id = arn.catalog_id;
 		attach_options.region = arn.region;
+		if (!arn.database.empty()) {
+			attach_options.default_schema = Identifier(arn.database);
+		}
 	} else {
 		SanityCheckGlueCatalogPath(attach_options.path);
 		if (attach_options.path != ":") {
@@ -82,7 +85,14 @@ unique_ptr<Catalog> GlueAttach::Attach(optional_ptr<StorageExtensionInfo> storag
 			attach_options.default_location = entry.second.ToString();
 			StringUtil::RTrim(attach_options.default_location, "/");
 		} else if (lower_name == "default_schema") {
-			attach_options.default_schema = Identifier(entry.second.ToString());
+			Identifier default_schema(entry.second.ToString());
+			if (!attach_options.default_schema.empty() &&
+			    default_schema.GetIdentifierName() != attach_options.default_schema.GetIdentifierName()) {
+				throw InvalidConfigurationException(
+				    "ATTACH option '%s' ('%s') conflicts with the database of the ARN ('%s')", entry.first,
+				    default_schema.GetIdentifierName(), attach_options.default_schema.GetIdentifierName());
+			}
+			attach_options.default_schema = default_schema;
 		} else if (lower_name == "verify_connection") {
 			attach_options.verify_connection = entry.second.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>();
 		} else {
