@@ -545,7 +545,8 @@ database ARN attaches its catalog with the database as the default schema), `glu
 catalogs under a node, deepest first, then of the node.
 
 **List** walks each region's tree with GetCatalogs and lists the databases of its root with GetDatabases; where Glue
-has no catalogs API (moto) or refuses it, the root alone stands for the tree. Without `region` the default-enabled
+has no catalogs API (moto) or refuses it, the root alone stands for the tree; the root of a region holding nothing,
+neither databases nor catalogs, is left out. Without `region` the default-enabled
 commercial regions are swept in parallel and a region that refuses is left out; with `region` that one is listed and
 its errors thrown; with `name`, a node as a path below the root or an ARN, the databases of that node. The metadata of
 a row says its `kind` (catalog or database) and `type`: `native`, `federated:<connection type>` or `redshift` for a

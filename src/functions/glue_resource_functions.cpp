@@ -415,7 +415,8 @@ void DestroyFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &o
 // Every node of the catalog tree, the default catalog and the catalogs under it, native, federated or managed, and
 // the databases of the root, native ones and resource links; the databases inside the other nodes are the nodes' own
 // structure and are listed with 'name' naming the node, as a path below the root or an ARN. Where Glue has no
-// catalogs API (a local server) or refuses it, the root alone stands for the tree. A catalog tree is per region:
+// catalogs API (a local server) or refuses it, the root alone stands for the tree; the root of a region holding
+// nothing is left out. A catalog tree is per region:
 // 'region' lists that one, its errors thrown; without it the default regions are swept in parallel, as the aws
 // extension lists table buckets, and a region that refuses (not enabled for the account, no permission) is left out.
 //===--------------------------------------------------------------------===//
@@ -557,6 +558,10 @@ void ListFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &outp
 		}
 		for (idx_t i = 0; i < regions.size(); i++) {
 			auto &listing = listings[i];
+			// the root of a region holding nothing, neither databases nor catalogs, is left out: every region has one
+			if (listing.databases.empty() && listing.nodes.size() <= 1) {
+				continue;
+			}
 			for (auto &node : listing.nodes) {
 				auto arn = ArnOf(node, regions[i]);
 				state.rows.push_back(
