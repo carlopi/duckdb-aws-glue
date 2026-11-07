@@ -39,6 +39,7 @@
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/entry_lookup_info.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
@@ -890,6 +891,61 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 	serializer.WriteProperty(111, "column_types", info.types);
 	serializer.WriteProperty(112, "csv_options", info.csv_options);
 	serializer.WriteProperty(113, "json_options", info.json_options);
+	// the Glue table of a table's scan, empty for a hive_scan() call: a copy of the plan reports it again
+	serializer.WritePropertyWithDefault<string>(114, "catalog", info.table ? info.catalog_name : string());
+	serializer.WritePropertyWithDefault<string>(115, "database", info.table ? info.database_name : string());
+	serializer.WritePropertyWithDefault<string>(116, "table", info.table ? info.table_name : string());
+}
+
+//! The Glue table a deserialized scan was bound to, while the catalog holds it as the scan read it: the same location
+//! and the same columns. A copy of a plan (CTE inlining copies a CTE's definition into each of its references) then
+//! reports its table through get_table_entry as the scan it copies does, and optimizers that match scans by their
+//! table see it. Anything else leaves the copy a scan of its location.
+static void RestoreScanTable(ClientContext &context, HiveScanInfo &info, const string &catalog_name,
+                             const string &database_name, const string &table_name) {
+	if (catalog_name.empty() || database_name.empty() || table_name.empty()) {
+		return;
+	}
+	optional_ptr<CatalogEntry> entry;
+	try {
+		auto catalog = Catalog::GetCatalogEntry(context, Identifier(catalog_name));
+		if (!catalog || catalog->GetCatalogType() != "glue") {
+			return;
+		}
+		EntryLookupInfo lookup(
+		    CatalogType::TABLE_ENTRY,
+		    QualifiedName(Identifier(catalog_name), Identifier(database_name), Identifier(table_name)));
+		entry = Catalog::GetEntry(context, lookup, OnEntryNotFound::RETURN_NULL);
+		if (!entry || entry->type != CatalogType::TABLE_ENTRY || &entry->ParentCatalog() != catalog.get()) {
+			return;
+		}
+	} catch (std::exception &ex) {
+		// the lookup must not fail the plan: within the statement that bound the scan it is served from the
+		// transaction's cache, elsewhere it may ask Glue
+		ErrorData error(ex);
+		DUCKDB_LOG_WARNING(context, "Hive scan of '%s.%s' keeps no table after a copy: %s", database_name, table_name,
+		                   error.RawMessage());
+		return;
+	}
+	auto &table = entry->Cast<GlueTable>();
+	if (table.table_info.location != info.root_location) {
+		return;
+	}
+	auto &columns = table.GetColumns();
+	if (columns.LogicalColumnCount() != info.names.size()) {
+		return;
+	}
+	idx_t i = 0;
+	for (auto &column : columns.Logical()) {
+		if (column.Name() != info.names[i] || column.Type() != info.types[i]) {
+			return;
+		}
+		i++;
+	}
+	info.catalog_name = catalog_name;
+	info.database_name = database_name;
+	info.table_name = table_name;
+	info.table = &table;
 }
 
 //! Bind the scan again from what HiveScanSerialize wrote: the partitions it holds are the ones the plan reads, those
@@ -910,6 +966,9 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 	info->types = deserializer.ReadProperty<vector<LogicalType>>(111, "column_types");
 	info->csv_options = deserializer.ReadProperty<HiveCSVOptions>(112, "csv_options");
 	info->json_options = deserializer.ReadProperty<HiveJSONOptions>(113, "json_options");
+	auto catalog_name = deserializer.ReadPropertyWithDefault<string>(114, "catalog");
+	auto database_name = deserializer.ReadPropertyWithDefault<string>(115, "database");
+	auto table_name = deserializer.ReadPropertyWithDefault<string>(116, "table");
 	if (partitions.size() != locations.size()) {
 		throw SerializationException("Hive scan of \"%s\": %d partitions but %d partition locations", info->table_name,
 		                             partitions.size(), locations.size());
@@ -922,6 +981,7 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 		partition_infos.push_back(std::move(partition));
 	}
 	info->SetPartitions(std::move(partition_infos));
+	RestoreScanTable(context, *info, catalog_name, database_name, table_name);
 	unique_ptr<FunctionData> bind_data;
 	function = BoundTableFunction(BindHiveScan(context, std::move(info), bind_data));
 	return bind_data;
