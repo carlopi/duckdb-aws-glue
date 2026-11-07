@@ -41,8 +41,10 @@ public:
 	//! CatalogId from the GetDatabases response
 	static string GetReportedCatalogId(ClientContext &context, GlueCatalog &catalog);
 	static string GetReportedCatalogId(ClientContext &context, const GlueAttachOptions &options);
-	//! The catalog tree of the account: its default catalog and every catalog under it (GetCatalogs)
-	static vector<GlueCatalogNodeInfo> GetCatalogs(ClientContext &context, const GlueAttachOptions &options);
+	//! The catalog tree of the account, its default catalog and every catalog under it, or with 'parent_catalog_id'
+	//! the subtree under that catalog, without it (GetCatalogs)
+	static vector<GlueCatalogNodeInfo> GetCatalogs(ClientContext &context, const GlueAttachOptions &options,
+	                                               const string &parent_catalog_id = string());
 	//! The catalog 'options.catalog_id' names (GetCatalog), false if it does not exist
 	static bool GetCatalog(ClientContext &context, const GlueAttachOptions &options, GlueCatalogNodeInfo &result);
 	//! Create a catalog under the account's default catalog (CreateCatalog)

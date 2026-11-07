@@ -266,21 +266,29 @@ void GlueAPI::DeleteCatalog(ClientContext &context, const GlueAttachOptions &opt
 	}
 }
 
-vector<GlueCatalogNodeInfo> GlueAPI::GetCatalogs(ClientContext &context, const GlueAttachOptions &options) {
+vector<GlueCatalogNodeInfo> GlueAPI::GetCatalogs(ClientContext &context, const GlueAttachOptions &options,
+                                                 const string &parent_catalog_id) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, options);
 	vector<GlueCatalogNodeInfo> result;
 	Aws::String next_token;
 	do {
 		Aws::Glue::Model::GetCatalogsRequest request;
-		request.SetIncludeRoot(true);
+		// Glue refuses IncludeRoot together with a parent
+		if (parent_catalog_id.empty()) {
+			request.SetIncludeRoot(true);
+		} else {
+			request.SetParentCatalogId(parent_catalog_id);
+		}
 		request.SetRecursive(true);
 		if (!next_token.empty()) {
 			request.SetNextToken(next_token);
 		}
 		auto outcome = client->GetCatalogs(request);
 		if (!outcome.IsSuccess()) {
-			ThrowGlueError(outcome, "GetCatalogs");
+			ThrowGlueError(outcome, parent_catalog_id.empty()
+			                            ? string("GetCatalogs")
+			                            : StringUtil::Format("GetCatalogs (under '%s')", parent_catalog_id));
 		}
 		for (auto &catalog : outcome.GetResult().GetCatalogList()) {
 			result.push_back(ToCatalogNodeInfo(catalog));

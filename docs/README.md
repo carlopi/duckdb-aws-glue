@@ -523,9 +523,10 @@ DESTROY EXTERNAL RESOURCE scratch;
 The listing is GetCatalogs with the credentials of the default secret; where Glue has no catalogs API (moto) or
 refuses it, it is the default catalog alone, found as the catalog of its databases. Status lists one page of the
 catalog's databases to tell it exists, and hands ATTACH the ARN as the path, `glue` as the type and the handle's
-`endpoint` and `secret` as options. Create is CreateCatalog with `path` as the name (required) and `region`,
+`endpoint` and `secret` as options. Create is CreateCatalog with `path` as the name (required; a nested `a/b/c` needs `a/b` to exist) and `region`,
 `description`, `endpoint` and `secret`; the catalog is marked with the parameter `duckdb-external-resource-type`.
-Destroy is DeleteCatalog; the account's default catalog is refused. Creating a catalog needs Lake Formation set up in
+Destroy is DeleteCatalog of the catalogs under the node, deepest first, then of the node; the account's default
+catalog is refused. Creating a catalog needs Lake Formation set up in
 the account, and the tables of a catalog made this way are not Hive tables, so the extension lists but cannot scan
 them. All callbacks default `region` to the region of the secret.
 

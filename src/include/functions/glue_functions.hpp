@@ -84,8 +84,8 @@ TableFunctionSet GetHiveScanFunction(DatabaseInstance &db);
 
 //! The external resource type 'aws:glue:catalog' (a node of the account's catalog tree) and its callbacks:
 //! __glue__catalog__create(params) makes a catalog, __glue__catalog__status(handle) checks one and gives what ATTACH
-//! takes, __glue__catalog__destroy(handle) deletes one and __glue__catalog__list(params) lists the tree, for
-//! SHOW ALL EXTERNAL RESOURCES
+//! takes, __glue__catalog__destroy(handle) deletes one with its subtree and __glue__catalog__list(params) lists the
+//! tree, for SHOW ALL EXTERNAL RESOURCES
 void RegisterGlueCatalogResource(ExtensionLoader &loader);
 
 } // namespace duckdb

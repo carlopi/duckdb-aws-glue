@@ -11,6 +11,8 @@
 #include "duckdb/main/external_resource_type_registry.hpp"
 #include "duckdb/main/secret/secret.hpp"
 
+#include <algorithm>
+
 namespace duckdb {
 
 //! The external resource type: a node of the account's catalog tree. Also stamped as a parameter on every catalog
@@ -129,8 +131,9 @@ void EmitRows(ResourceState &state, DataChunk &output) {
 // create(params MAP) -> TABLE(handle MAP)
 //
 // CreateCatalog is synchronous, so this returns the handle of a catalog that already exists. Params: 'path', the name
-// of the catalog (required; a nested path is passed to Glue as given), 'region' (default: the region of the secret),
-// 'description', 'endpoint' and 'secret'. The account's default catalog is never created: it exists.
+// of the catalog (required; a nested path 'a/b/c' is passed to Glue as given, once its parent 'a/b' is found to
+// exist), 'region' (default: the region of the secret), 'description', 'endpoint' and 'secret'. The account's default
+// catalog is never created: it exists.
 //===--------------------------------------------------------------------===//
 
 unique_ptr<FunctionData> CreateBind(ClientContext &, TableFunctionBindInput &input, vector<LogicalType> &return_types,
@@ -153,6 +156,17 @@ void CreateFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
 			                            GLUE_CATALOG_TYPE);
 		}
 		auto options = OptionsOf(context, bind.input, string());
+		// a nested catalog goes under a catalog that exists
+		auto separator = path.find_last_of('/');
+		if (separator != string::npos) {
+			auto parent = path.substr(0, separator);
+			GlueCatalogNodeInfo parent_node;
+			if (parent.empty() ||
+			    !GlueAPI::GetCatalog(context, OptionsOf(context, bind.input, parent, options.region), parent_node)) {
+				throw InvalidInputException("%s create: the parent catalog '%s' of '%s' does not exist",
+				                            GLUE_CATALOG_TYPE, parent, path);
+			}
+		}
 		unordered_map<string, string> parameters {{RESOURCE_TYPE_PARAMETER, GLUE_CATALOG_TYPE}};
 		GlueAPI::CreateCatalog(context, options, path, MapLookup(bind.input, "description"), parameters);
 
@@ -213,8 +227,8 @@ void StatusFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
 //===--------------------------------------------------------------------===//
 // destroy(handle MAP) -> TABLE(status VARCHAR)
 //
-// DeleteCatalog on the catalog the handle names. The account's default catalog cannot be deleted, and is refused
-// before any call.
+// DeleteCatalog on the catalog the handle names, after the catalogs under it, deepest first. The account's default
+// catalog cannot be deleted, and is refused before any call.
 //===--------------------------------------------------------------------===//
 
 unique_ptr<FunctionData> DestroyBind(ClientContext &, TableFunctionBindInput &input, vector<LogicalType> &return_types,
@@ -237,7 +251,16 @@ void DestroyFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &o
 			                            "destroyed ('%s')",
 			                            MapLookup(bind.input, "arn"));
 		}
-		GlueAPI::DeleteCatalog(context, OptionsOf(context, bind.input, arn.catalog_id, arn.region));
+		auto options = OptionsOf(context, bind.input, arn.catalog_id, arn.region);
+		auto subtree = GlueAPI::GetCatalogs(context, options, arn.catalog_id);
+		std::sort(subtree.begin(), subtree.end(), [](const GlueCatalogNodeInfo &a, const GlueCatalogNodeInfo &b) {
+			return std::count(a.catalog_id.begin(), a.catalog_id.end(), '/') >
+			       std::count(b.catalog_id.begin(), b.catalog_id.end(), '/');
+		});
+		for (auto &node : subtree) {
+			GlueAPI::DeleteCatalog(context, OptionsOf(context, bind.input, node.catalog_id, arn.region));
+		}
+		GlueAPI::DeleteCatalog(context, options);
 		state.rows.push_back({Value("deleted")});
 	}
 	EmitRows(state, output);
