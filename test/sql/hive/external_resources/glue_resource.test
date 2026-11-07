@@ -47,9 +47,9 @@ SELECT reference FROM __glue__list(MAP {'endpoint': '{GLUE_ENDPOINT}', 'region':
 ----
 arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog
 
-# the databases of one catalog, named by ARN
+# the databases of one node, named by ARN or as a path below the root (the root itself: by ARN)
 query II
-SELECT name, metadata['kind'] FROM __glue__list(MAP {'endpoint': '{GLUE_ENDPOINT}', 'catalog': 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog'}) WHERE name = 'default';
+SELECT name, metadata['kind'] FROM __glue__list(MAP {'endpoint': '{GLUE_ENDPOINT}', 'name': 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog'}) WHERE name = 'default';
 ----
 default	database
 
@@ -59,9 +59,9 @@ SELECT * FROM __glue__list(MAP {'endpoint': '{GLUE_ENDPOINT}', 'secret': 'no_suc
 No secret by the name of 'no_such_secret'
 
 statement error
-SELECT * FROM __glue__list(MAP {'endpoint': '{GLUE_ENDPOINT}', 'catalog': 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:database/default'});
+SELECT * FROM __glue__list(MAP {'endpoint': '{GLUE_ENDPOINT}', 'name': 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:database/default'});
 ----
-'catalog' names a database, not a catalog
+'name' names a database, not a catalog
 
 #===--------------------------------------------------------------------===//
 # catalog nodes
@@ -106,7 +106,7 @@ SELECT status FROM __glue__destroy(MAP {'arn': 'arn:aws:glue:us-east-1:{GLUE_CAT
 ----
 kept
 
-# create without a path or a database is the root catalog of the region, which exists: nothing is created
+# create without a name is the root catalog of the region, which exists: nothing is created
 query I
 SELECT handle FROM __glue__create(MAP {'endpoint': '{GLUE_ENDPOINT}'});
 ----
@@ -123,31 +123,47 @@ default
 statement ok
 DETACH root_datalake;
 
-# Glue creates no native catalog below the root
+# a name alone is a database; a catalog is implied by its federation parameters or said with 'type', and Glue
+# creates no native one below the root
 statement error
-SELECT * FROM __glue__create(MAP {'path': 'scratch', 'endpoint': '{GLUE_ENDPOINT}'});
+SELECT * FROM __glue__create(MAP {'name': 'scratch', 'type': 'catalog', 'endpoint': '{GLUE_ENDPOINT}'});
 ----
 Glue creates no native catalog below the root
 
 statement error
-SELECT * FROM __glue__create(MAP {'path': 'scratch', 'connection': 'c', 'endpoint': '{GLUE_ENDPOINT}'});
+SELECT * FROM __glue__create(MAP {'name': 'scratch', 'connection': 'c', 'endpoint': '{GLUE_ENDPOINT}'});
 ----
 needs both 'connection' and 'identifier'
 
+statement error
+SELECT * FROM __glue__create(MAP {'name': 'scratch', 'type': 'schema', 'endpoint': '{GLUE_ENDPOINT}'});
+----
+'type' is 'catalog' or 'database', not 'schema'
+
+statement error
+SELECT * FROM __glue__create(MAP {'name': 'scratch', 'type': 'catalog', 'location': 's3://x/y', 'endpoint': '{GLUE_ENDPOINT}'});
+----
+'location' and 'target' belong to a database
+
+statement error
+SELECT * FROM __glue__create(MAP {'name': 'scratch', 'type': 'database', 'connection': 'c', 'identifier': 'i', 'endpoint': '{GLUE_ENDPOINT}'});
+----
+'location' and 'target' belong to a database
+
 # the local server has no catalogs API: creating and deleting a catalog reach it and fail there
 statement error
-SELECT * FROM __glue__create(MAP {'path': 'scratch', 'connection': 'c', 'identifier': 'i', 'endpoint': '{GLUE_ENDPOINT}'});
+SELECT * FROM __glue__create(MAP {'name': 'scratch', 'connection': 'c', 'identifier': 'i', 'endpoint': '{GLUE_ENDPOINT}'});
 ----
 Glue CreateCatalog 'scratch' failed
 
 # a nested catalog needs its parent, which is looked up first, by its account-qualified id
 statement error
-SELECT * FROM __glue__create(MAP {'path': 'scratch/child', 'connection': 'c', 'identifier': 'i', 'endpoint': '{GLUE_ENDPOINT}'});
+SELECT * FROM __glue__create(MAP {'name': 'scratch/child', 'connection': 'c', 'identifier': 'i', 'endpoint': '{GLUE_ENDPOINT}'});
 ----
 Glue GetCatalog '{GLUE_CATALOG_ID}:scratch' failed
 
 statement error
-SELECT * FROM __glue__create(MAP {'path': '/child', 'connection': 'c', 'identifier': 'i', 'endpoint': '{GLUE_ENDPOINT}'});
+SELECT * FROM __glue__create(MAP {'name': '/child', 'connection': 'c', 'identifier': 'i', 'endpoint': '{GLUE_ENDPOINT}'});
 ----
 the parent catalog '' of '/child' does not exist
 
@@ -157,25 +173,25 @@ SELECT * FROM __glue__destroy(MAP {'arn': 'arn:aws:glue:us-east-1:{GLUE_CATALOG_
 ----
 Glue GetCatalogs (under '{GLUE_CATALOG_ID}:scratch') failed
 
-statement error
-SELECT * FROM __glue__create(MAP {'path': 'scratch', 'database': 'x', 'endpoint': '{GLUE_ENDPOINT}'});
-----
-give 'path' for a catalog or 'database' for a database, not both
-
 #===--------------------------------------------------------------------===//
 # databases
 #===--------------------------------------------------------------------===//
 
-# a database of the registered root, with a location for its tables; the handle is its ARN
+# a name alone is a database of the root, here with a location for its tables; the handle is its ARN
 query I
-SELECT handle FROM __glue__create(MAP {'database': 'res_db', 'catalog': 'local_glue', 'location': '{DEFAULT_S3_LOCATION}/{TEST_DIR}/res_db', 'endpoint': '{GLUE_ENDPOINT}'});
+SELECT handle FROM __glue__create(MAP {'name': 'res_db', 'location': '{DEFAULT_S3_LOCATION}/{TEST_DIR}/res_db', 'endpoint': '{GLUE_ENDPOINT}'});
 ----
 {arn='arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:database/res_db', endpoint='{GLUE_ENDPOINT}'}
 
 statement error
-SELECT * FROM __glue__create(MAP {'database': 'res_db', 'endpoint': '{GLUE_ENDPOINT}'});
+SELECT * FROM __glue__create(MAP {'name': 'res_db', 'endpoint': '{GLUE_ENDPOINT}'});
 ----
 database 'res_db' already exists in catalog '{GLUE_CATALOG_ID}'
+
+statement error
+SELECT * FROM __glue__create(MAP {'name': 'res_db/', 'endpoint': '{GLUE_ENDPOINT}'});
+----
+is not a database name or a path to one
 
 # status: the database exists; ATTACH gets its ARN, which attaches the catalog with the database as default schema
 query II
@@ -226,7 +242,7 @@ native	{DEFAULT_S3_LOCATION}/{TEST_DIR}/res_db
 
 # a resource link to it, in the same root; its listing names the target
 query I
-SELECT handle FROM __glue__create(MAP {'database': 'res_link', 'target': 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:database/res_db', 'endpoint': '{GLUE_ENDPOINT}'});
+SELECT handle FROM __glue__create(MAP {'name': 'res_link', 'target': 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:database/res_db', 'endpoint': '{GLUE_ENDPOINT}'});
 ----
 {arn='arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:database/res_link', endpoint='{GLUE_ENDPOINT}'}
 
@@ -236,12 +252,12 @@ SELECT metadata['type'], metadata['target'] FROM __glue__list(MAP {'endpoint': '
 link	arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:database/res_db
 
 statement error
-SELECT * FROM __glue__create(MAP {'database': 'res_link2', 'target': 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog', 'endpoint': '{GLUE_ENDPOINT}'});
+SELECT * FROM __glue__create(MAP {'name': 'res_link2', 'target': 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog', 'endpoint': '{GLUE_ENDPOINT}'});
 ----
 'target' must be the ARN of a database
 
 statement error
-SELECT * FROM __glue__create(MAP {'database': 'res_link2', 'target': 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:database/res_db', 'location': 's3://x/y', 'endpoint': '{GLUE_ENDPOINT}'});
+SELECT * FROM __glue__create(MAP {'name': 'res_link2', 'target': 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:database/res_db', 'location': 's3://x/y', 'endpoint': '{GLUE_ENDPOINT}'});
 ----
 a resource link has no 'location' of its own
 
@@ -265,15 +281,9 @@ SELECT * FROM __glue__status(MAP {'arn': 'arn:aws:glue:us-east-1:{GLUE_CATALOG_I
 ----
 does not exist
 
-# 'catalog' is an ARN, a registered resource or a catalog id; anything else is refused before any call
-statement error
-SELECT * FROM __glue__create(MAP {'database': 'x', 'catalog': 'no_such_resource', 'endpoint': '{GLUE_ENDPOINT}'});
-----
-'catalog' must be a catalog ARN, the name of a registered resource or a Glue catalog id
-
 # one statement: a database created on ATTACH and deleted on DETACH
 statement ok
-ATTACH TO NEW TEMPORARY EXTERNAL RESOURCE 'aws:glue' (DATABASE 'res_tmp', LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/res_tmp', ENDPOINT '{GLUE_ENDPOINT}') AS tmp_datalake;
+ATTACH TO NEW TEMPORARY EXTERNAL RESOURCE 'aws:glue' (NAME 'res_tmp', LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/res_tmp', ENDPOINT '{GLUE_ENDPOINT}') AS tmp_datalake;
 
 statement ok
 CREATE TABLE tmp_datalake.res_tmp.t AS SELECT 1 AS one;
