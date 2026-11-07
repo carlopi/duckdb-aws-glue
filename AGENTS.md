@@ -106,6 +106,10 @@ Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
   SQL into `CALL glue_alter_table(...)`.
 - `glue_get_table_response` (`src/functions/glue_functions.cpp`) returns the raw Glue `Table` as VARIANT — handy for
   asserting Glue state in tests.
+- **External resources** `src/functions/glue_resource_functions.cpp`: the `aws:glue:catalog` resource type of DuckDB's
+  `EXTERNAL RESOURCE` framework with create (CreateCatalog), status, destroy (DeleteCatalog) and list callbacks; list
+  walks the catalog tree with GetCatalogs (the default catalog alone where that API is missing, as on moto, which has
+  none of the catalogs API). ARNs are parsed in `src/catalog/glue_arn.cpp`.
 
 ## Coding guidelines
 

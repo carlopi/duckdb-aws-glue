@@ -1,6 +1,7 @@
 add_library_unity(
   glue_catalog
   OBJECT
+  glue_arn.cpp
   glue_attach.cpp
   glue_catalog.cpp
   glue_schema_entry.cpp

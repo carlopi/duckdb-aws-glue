@@ -1,0 +1,103 @@
+# name: test/sql/hive/external_resources/glue_catalog_resource.test
+# description: the aws:glue:catalog external resource type and its list callback
+# group: [external_resources]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+# the local server answers the catalogs API with an internal error, which both the SDK and DuckDB's transport would
+# otherwise retry with backoff
+statement ok
+SET glue_max_retries = 0;
+
+statement ok
+SET http_retries = 0;
+
+# the type is registered from C++ (origin 'extension'), so loading the extension is all a user needs
+query IIII
+SELECT name, kind, origin, list_function FROM duckdb_external_resource_types() WHERE name = 'aws:glue:catalog';
+----
+aws:glue:catalog	catalog	extension	__glue__catalog__list
+
+# the local server has no catalogs API, so the listing is the default catalog alone, found as the catalog of its
+# databases; the handle carries the endpoint the params named, the region comes from the secret
+query IIIII
+SELECT handle, name, reference, state, metadata
+FROM __glue__catalog__list(MAP {'endpoint': '{GLUE_ENDPOINT}'});
+----
+{arn='arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog', endpoint='{GLUE_ENDPOINT}'}	{GLUE_CATALOG_ID}	arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog	ready	{catalog_id={GLUE_CATALOG_ID}, type=native, description=''}
+
+# a region given explicitly: the local server keeps its databases per region, and without a database to report the
+# catalog id there is no row for the default catalog
+query I
+SELECT reference FROM __glue__catalog__list(MAP {'endpoint': '{GLUE_ENDPOINT}', 'region': 'eu-central-1'});
+----
+
+statement error
+SELECT * FROM __glue__catalog__list(MAP {'endpoint': '{GLUE_ENDPOINT}', 'secret': 'no_such_secret'});
+----
+No secret by the name of 'no_such_secret'
+
+query III
+SELECT create_function, status_function, destroy_function
+FROM duckdb_external_resource_types() WHERE name = 'aws:glue:catalog';
+----
+__glue__catalog__create	__glue__catalog__status	__glue__catalog__destroy
+
+# status of the default catalog: ready, with what ATTACH takes (the ARN as the path, the handle's endpoint as an option)
+query II
+SELECT state, result
+FROM __glue__catalog__status(MAP {'arn': 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog', 'endpoint': '{GLUE_ENDPOINT}'});
+----
+ready	{uri='arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog', attached_db_type=glue, endpoint='{GLUE_ENDPOINT}'}
+
+statement error
+SELECT * FROM __glue__catalog__status(MAP {'endpoint': '{GLUE_ENDPOINT}'});
+----
+handle is missing 'arn'
+
+statement error
+SELECT * FROM __glue__catalog__status(MAP {'arn': 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:database/default'});
+----
+is not a catalog ARN
+
+# REGISTER resolves the handle through status; ATTACH TO EXTERNAL RESOURCE then attaches the catalog
+statement ok
+REGISTER EXTERNAL RESOURCE 'aws:glue:catalog' AS local_glue
+FROM MAP {'arn': 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog', 'endpoint': '{GLUE_ENDPOINT}'};
+
+statement ok
+ATTACH TO EXTERNAL RESOURCE local_glue AS registered_datalake;
+
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'registered_datalake' AND schema_name = 'default';
+----
+default
+
+statement ok
+DETACH registered_datalake;
+
+# the default catalog is never destroyed
+statement error
+DESTROY EXTERNAL RESOURCE local_glue;
+----
+the default catalog of an account cannot be destroyed
+
+# the local server has no catalogs API: creating and deleting a catalog reach it and fail there
+statement error
+SELECT * FROM __glue__catalog__create(MAP {'endpoint': '{GLUE_ENDPOINT}'});
+----
+'path', the name of the catalog to create, is required
+
+statement error
+SELECT * FROM __glue__catalog__create(MAP {'path': 'scratch', 'endpoint': '{GLUE_ENDPOINT}'});
+----
+Glue CreateCatalog 'scratch' failed
+
+statement error
+SELECT * FROM __glue__catalog__destroy(MAP {'arn': 'arn:aws:glue:us-east-1:{GLUE_CATALOG_ID}:catalog/scratch', 'endpoint': '{GLUE_ENDPOINT}'});
+----
+Glue DeleteCatalog '{GLUE_CATALOG_ID}:scratch' failed

@@ -48,6 +48,19 @@ struct GlueDatabaseInfo {
 	unordered_map<string, string> parameters;
 };
 
+//! A node of the catalog tree (GetCatalogs): the account's default catalog or a catalog under it
+struct GlueCatalogNodeInfo {
+	//! The Glue catalog id: the account id, or '<account id>:<catalog>/<nested>'
+	string catalog_id;
+	string name;
+	//! The ARN Glue reports, empty where it reports none
+	string resource_arn;
+	string description;
+	//! 'native', 'federated' (metadata held by another service) or 'redshift' (a managed Redshift catalog)
+	string kind;
+	unordered_map<string, string> parameters;
+};
+
 //! The file format of a Hive table's data files, decided by its SerDe
 enum class HiveFileFormat : uint8_t { PARQUET, CSV, JSON, AVRO };
 string HiveFileFormatToString(HiveFileFormat format);

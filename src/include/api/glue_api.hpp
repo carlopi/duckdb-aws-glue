@@ -21,6 +21,7 @@ class GlueClient;
 namespace duckdb {
 class ClientContext;
 class GlueCatalog;
+struct GlueAttachOptions;
 class Value;
 
 class GlueException : public IOException {
@@ -39,6 +40,16 @@ class GlueAPI {
 public:
 	//! CatalogId from the GetDatabases response
 	static string GetReportedCatalogId(ClientContext &context, GlueCatalog &catalog);
+	static string GetReportedCatalogId(ClientContext &context, const GlueAttachOptions &options);
+	//! The catalog tree of the account: its default catalog and every catalog under it (GetCatalogs)
+	static vector<GlueCatalogNodeInfo> GetCatalogs(ClientContext &context, const GlueAttachOptions &options);
+	//! The catalog 'options.catalog_id' names (GetCatalog), false if it does not exist
+	static bool GetCatalog(ClientContext &context, const GlueAttachOptions &options, GlueCatalogNodeInfo &result);
+	//! Create a catalog under the account's default catalog (CreateCatalog)
+	static void CreateCatalog(ClientContext &context, const GlueAttachOptions &options, const string &name,
+	                          const string &description, const unordered_map<string, string> &parameters);
+	//! Delete the catalog 'options.catalog_id' names (DeleteCatalog)
+	static void DeleteCatalog(ClientContext &context, const GlueAttachOptions &options);
 
 	//! List all databases of the catalog
 	static vector<GlueDatabaseInfo> GetDatabases(ClientContext &context, GlueCatalog &catalog);
@@ -163,6 +174,8 @@ public:
 private:
 	//! Get (or create) the Glue client for the catalog, using the credentials of the configured DuckDB secret
 	static std::shared_ptr<Aws::Glue::GlueClient> GetClient(ClientContext &context, GlueCatalog &catalog);
+	//! A Glue client for a connection no attached catalog holds, built on every call
+	static std::shared_ptr<Aws::Glue::GlueClient> GetClient(ClientContext &context, const GlueAttachOptions &options);
 };
 
 } // namespace duckdb

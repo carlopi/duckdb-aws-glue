@@ -6,10 +6,10 @@
 #include "duckdb/main/secret/secret.hpp"
 
 #include "api/glue_api.hpp"
+#include "catalog/glue_arn.hpp"
 #include "catalog/glue_options.hpp"
 #include "catalog/glue_catalog.hpp"
 
-#include <algorithm>
 #include <regex>
 
 namespace duckdb {
@@ -39,54 +39,6 @@ void SanityCheckGlueCatalogPath(const string &path) {
 	    path);
 }
 
-bool IsArn(const string &path) {
-	return StringUtil::StartsWith(StringUtil::Lower(path), "arn:");
-}
-
-struct GlueArn {
-	string region;
-	string catalog_id;
-};
-
-//! arn:<partition>:glue:<region>:<account id>:catalog[/<catalog>/<nested>...]
-GlueArn ParseGlueCatalogArn(const string &arn) {
-	auto parts = StringUtil::Split(arn, ':');
-	if (parts.size() < 6) {
-		throw InvalidConfigurationException("Invalid Glue ARN '%s': expected "
-		                                    "'arn:<partition>:glue:<region>:<account id>:catalog[/<catalog>/<nested>]'",
-		                                    arn);
-	}
-	if (StringUtil::Lower(parts[2]) != "glue") {
-		throw InvalidConfigurationException("'%s' is not a Glue ARN (service '%s')", arn, parts[2]);
-	}
-	GlueArn result;
-	result.region = parts[3];
-	if (result.region.empty()) {
-		throw InvalidConfigurationException("Glue ARN '%s' does not specify a region", arn);
-	}
-	auto &account_id = parts[4];
-	if (account_id.size() != 12 || !std::all_of(account_id.begin(), account_id.end(), StringUtil::CharacterIsDigit)) {
-		throw InvalidConfigurationException("Glue ARN '%s' does not specify a 12-digit account id", arn);
-	}
-	// the resource is everything after the fifth ':'
-	auto resource = StringUtil::Join(vector<string>(parts.begin() + 5, parts.end()), ":");
-	const string catalog_prefix = "catalog/";
-	if (resource == "catalog") {
-		result.catalog_id = account_id;
-	} else if (StringUtil::StartsWith(resource, catalog_prefix)) {
-		auto catalog_path = resource.substr(catalog_prefix.size());
-		if (catalog_path.empty() || catalog_path.front() == '/' || catalog_path.back() == '/' ||
-		    StringUtil::Contains(catalog_path, "//")) {
-			throw InvalidConfigurationException("Glue ARN '%s' has an empty catalog name", arn);
-		}
-		result.catalog_id = account_id + ":" + catalog_path;
-	} else {
-		throw InvalidConfigurationException(
-		    "Glue ARN '%s' is not a catalog ARN: only a catalog ('catalog' or 'catalog/<name>') can be attached", arn);
-	}
-	return result;
-}
-
 } // namespace
 
 unique_ptr<Catalog> GlueAttach::Attach(optional_ptr<StorageExtensionInfo> storage_info, ClientContext &context,
@@ -97,7 +49,7 @@ unique_ptr<Catalog> GlueAttach::Attach(optional_ptr<StorageExtensionInfo> storag
 	attach_options.path = info.path;
 	auto from_arn = IsArn(info.path);
 	if (from_arn) {
-		auto arn = ParseGlueCatalogArn(info.path);
+		auto arn = ParseGlueArn(info.path);
 		attach_options.catalog_id = arn.catalog_id;
 		attach_options.region = arn.region;
 	} else {

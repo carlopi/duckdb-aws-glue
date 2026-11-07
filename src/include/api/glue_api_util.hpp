@@ -67,10 +67,15 @@ bool IsAlreadyExists(const OUTCOME &outcome) {
 }
 
 template <class REQUEST>
-void SetCatalogId(REQUEST &request, const GlueCatalog &catalog) {
-	if (!catalog.options.catalog_id.empty()) {
-		request.SetCatalogId(catalog.options.catalog_id);
+void SetCatalogId(REQUEST &request, const GlueAttachOptions &options) {
+	if (!options.catalog_id.empty()) {
+		request.SetCatalogId(options.catalog_id);
 	}
+}
+
+template <class REQUEST>
+void SetCatalogId(REQUEST &request, const GlueCatalog &catalog) {
+	SetCatalogId(request, catalog.options);
 }
 
 } // namespace duckdb

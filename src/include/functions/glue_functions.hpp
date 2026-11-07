@@ -6,6 +6,7 @@
 
 namespace duckdb {
 
+class ExtensionLoader;
 class GlueCatalog;
 struct GlueColumn;
 
@@ -80,5 +81,11 @@ TableFunction GetGlueAlterTableFunction();
 //! partition_keys := [...]): read a parquet Hive table without a catalog. The same scan as for a Glue Hive table,
 //! with the schema and the partitions (values and locations) given as arguments.
 TableFunctionSet GetHiveScanFunction(DatabaseInstance &db);
+
+//! The external resource type 'aws:glue:catalog' (a node of the account's catalog tree) and its callbacks:
+//! __glue__catalog__create(params) makes a catalog, __glue__catalog__status(handle) checks one and gives what ATTACH
+//! takes, __glue__catalog__destroy(handle) deletes one and __glue__catalog__list(params) lists the tree, for
+//! SHOW ALL EXTERNAL RESOURCES
+void RegisterGlueCatalogResource(ExtensionLoader &loader);
 
 } // namespace duckdb
