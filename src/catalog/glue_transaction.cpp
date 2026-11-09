@@ -39,6 +39,27 @@ void GlueTransaction::Rollback() {
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
 		transaction_state = GlueTransactionState::TRANSACTION_FINISHED;
 	}
+	// Rolled back: drop every table created in this transaction. A failed drop is logged (with the table
+	// name, so it can be dropped manually).
+	auto client_context = context.lock();
+	for (auto &created : created_tables) {
+		try {
+			GlueAPI::DropCreatedTable(created.client, created.catalog_id, created.database_name, created.table_name);
+		} catch (std::exception &ex) {
+			if (client_context) {
+				ErrorData error(ex);
+				DUCKDB_LOG_WARNING(*client_context,
+				                   "Table cleanup: could not drop Glue table '%s.%s' after rollback: %s",
+				                   created.database_name, created.table_name, error.RawMessage());
+			}
+		}
+	}
+}
+
+void GlueTransaction::AddCreatedTable(std::shared_ptr<Aws::Glue::GlueClient> client, string catalog_id,
+                                      string database_name, string table_name) {
+	created_tables.push_back(
+	    CreatedTable {std::move(client), std::move(catalog_id), std::move(database_name), std::move(table_name)});
 }
 
 GlueTransaction &GlueTransaction::Get(ClientContext &context, Catalog &catalog) {

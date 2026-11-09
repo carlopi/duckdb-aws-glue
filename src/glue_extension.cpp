@@ -76,12 +76,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "not write one: INSERT into it and CREATE TABLE ... AS with these options are refused. "
 	                          "Default false.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
-	config.AddExtensionOption(
-	    "experimental_glue_view_enable_external_catalogs",
-	    "Allow Glue views over tables of other kinds of catalogs, stored by the catalog's type and "
-	    "the alias it is attached under: a view reads only where a catalog of that type is "
-	    "attached under that alias. Default false.",
-	    LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	// global only: a view entry is shared by all sessions and reads it without a ClientContext
+	ExtensionOption external_catalog_types(
+	    "Types of non-Glue catalogs (e.g. ['duckdb', 'iceberg']) whose tables Glue views may store, by type and alias, "
+	    "and read; never catalogs in memory, temporary, system or hidden. Global only. Default empty.",
+	    LogicalType::LIST(LogicalType::VARCHAR), nullptr, Value::LIST(LogicalType::VARCHAR, vector<Value>()),
+	    SetScope::GLOBAL, false, false);
+	external_catalog_types.supports_session = false;
+	config.AddExtensionOption("experimental_glue_view_external_catalog_types", std::move(external_catalog_types));
 	config.AddExtensionOption("glue_metadata_cache_scope",
 	                          "How long resolved Glue metadata (tables, partitions) is reused: 'transaction' (default) "
 	                          "re-resolves per transaction, so writes from other sessions become visible between "

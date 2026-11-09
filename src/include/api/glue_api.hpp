@@ -6,6 +6,7 @@
 #include "core/glue_info.hpp"
 
 #include "duckdb/common/pair.hpp"
+#include "duckdb/common/map.hpp"
 #include "duckdb/common/set.hpp"
 #include "duckdb/common/enums/set_scope.hpp"
 
@@ -126,6 +127,10 @@ public:
 	static set<vector<string>> ExistingPartitions(ClientContext &context, GlueCatalog &catalog,
 	                                              const string &database_name, const string &table_name,
 	                                              const vector<vector<string>> &partitions);
+	//! The locations of those of 'partitions' that exist, by their values (BatchGetPartition)
+	static map<vector<string>, string> PartitionLocations(ClientContext &context, GlueCatalog &catalog,
+	                                                      const string &database_name, const string &table_name,
+	                                                      const vector<vector<string>> &partitions);
 	//! Change the values of a partition, keeping its location and everything else (UpdatePartition). 'partition'
 	//! is the partition as fetched; the caller has checked that no partition has 'new_values'. Returns the
 	//! location, which the rename keeps.
@@ -136,15 +141,24 @@ public:
 	static vector<GluePartitionInfo> GetPartitions(ClientContext &context, GlueCatalog &catalog,
 	                                               const string &database_name, const string &table_name);
 	//! Register partitions of a Hive table (BatchCreatePartition); their StorageDescriptor is the one of 'table',
-	//! as fetched, with each partition's location. Partitions that already exist are skipped; throws for the first
-	//! partition Glue refuses, after retrying the errors that may pass.
-	static void BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table,
-	                                  const vector<GluePartitionInput> &partitions);
+	//! as fetched, with each partition's location. Partitions that already exist are skipped and returned, wherever
+	//! they are registered; throws for the first partition Glue refuses, after retrying the errors that may pass.
+	static vector<GluePartitionInput> BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog,
+	                                                        const GlueTableInfo &table,
+	                                                        const vector<GluePartitionInput> &partitions);
 	//! SET callback of glue_debug_fail_partition_registration: rejects a value that is not '<error code>:<index>'
 	static void CheckDebugFailPartitionRegistration(ClientContext &context, SetScope scope, Value &parameter);
 	//! Delete a table (the data files are left in place), throws a CatalogException if it does not exist
 	static void DeleteTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                        const string &table_name);
+	//! Record a just-created table on the active Glue transaction so that, if the transaction rolls back instead
+	//! of committing, the table is dropped from Glue. The client is captured now, while the transaction is active.
+	static void RegisterTableCleanup(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                 const string &table_name);
+	//! Drop a table using a pre-captured client, for rollback cleanup that runs without an active transaction to
+	//! resolve a client. "Already gone" is treated as success; other failures throw a GlueException.
+	static void DropCreatedTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, const string &catalog_id,
+	                             const string &database_name, const string &table_name);
 
 private:
 	//! Get (or create) the Glue client for the catalog, using the credentials of the configured DuckDB secret
