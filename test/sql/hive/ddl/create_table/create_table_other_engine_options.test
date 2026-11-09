@@ -39,6 +39,11 @@ CREATE TABLE my_datalake.default.engine_opts (id INTEGER, dt VARCHAR) WITH (part
 Unknown CREATE TABLE option 'partition_by', use a PARTITIONED BY (...) clause instead
 
 statement error
+CREATE TABLE my_datalake.default.engine_opts WITH (partition_by = ['dt']) AS SELECT 1 AS id, 'a' AS dt;
+----
+Unknown CREATE TABLE option 'partition_by', use a PARTITIONED BY (...) clause instead
+
+statement error
 CREATE TABLE my_datalake.default.engine_opts (id INTEGER, dt VARCHAR) WITH (partition_columns = ['dt']);
 ----
 Unknown CREATE TABLE option 'partition_columns', use a PARTITIONED BY (...) clause instead
