@@ -42,11 +42,13 @@ SELECT id FROM throttled_dl.fault_throttled_grl.t;
 ----
 42
 
-query I
-SELECT count(*) > 0 FROM duckdb_logs_parsed('GlueRetry')
-WHERE error = 'ThrottlingException' AND message = 'injected by glue_fault_proxy' AND status = 400 AND retry = 1;
+# one entry for the one throttled GetTable, with the limit and delay of the SDK's default policy, which does not wait
+# before its first retry
+query IIIIIIII
+SELECT error, message, status, retry, max_retries, delay_ms, request_id IS NOT NULL, count(*) OVER ()
+FROM duckdb_logs_parsed('GlueRetry');
 ----
-true
+ThrottlingException	injected by glue_fault_proxy	400	1	10	0	true	1
 
 # the same through the AWS SDK's own HTTP client
 statement ok
@@ -60,11 +62,13 @@ SELECT id FROM throttled_dl.fault_throttled_grl.t;
 ----
 42
 
-query I
-SELECT count(*) > 0 FROM duckdb_logs_parsed('GlueRetry')
-WHERE error = 'ThrottlingException' AND message = 'injected by glue_fault_proxy' AND status = 400 AND retry = 1;
+# one entry for the one throttled GetTable, with the limit and delay of the SDK's default policy, which does not wait
+# before its first retry
+query IIIIIIII
+SELECT error, message, status, retry, max_retries, delay_ms, request_id IS NOT NULL, count(*) OVER ()
+FROM duckdb_logs_parsed('GlueRetry');
 ----
-true
+ThrottlingException	injected by glue_fault_proxy	400	1	10	0	true	1
 
 statement ok
 RESET glue_network_calls_via_duckdb;
@@ -81,10 +85,11 @@ SELECT id FROM throttled_dl.fault_throttled_grl.t;
 ----
 42
 
-query II
-SELECT DISTINCT retry, max_retries FROM duckdb_logs_parsed('GlueRetry');
+# the standard policy waits up to a second before its first retry
+query IIII
+SELECT retry, max_retries, delay_ms < 1000, count(*) OVER () FROM duckdb_logs_parsed('GlueRetry');
 ----
-1	2
+1	2	true	1
 
 # without retries the throttled call fails, and nothing is logged as retried
 statement ok

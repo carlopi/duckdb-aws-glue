@@ -17,6 +17,7 @@ SDK's amz-sdk-request header) and forwarded when the SDK retries it."""
 import argparse
 import http.client
 import json
+import uuid
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -182,7 +183,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def reply_error(self, error):
         payload = json.dumps({"__type": error, "Message": "injected by glue_fault_proxy"}).encode()
-        self.reply(400, [("Content-Type", "application/x-amz-json-1.1"), ("x-amzn-ErrorType", error)], payload)
+        headers = [("Content-Type", "application/x-amz-json-1.1"), ("x-amzn-ErrorType", error)]
+        self.reply(400, headers + [("x-amzn-RequestId", str(uuid.uuid4()))], payload)
 
     def reply(self, status, headers, body):
         self.send_response(status)

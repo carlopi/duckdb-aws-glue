@@ -120,9 +120,9 @@ std::shared_ptr<Aws::Glue::GlueClient> GlueAPI::GetClient(ClientContext &context
 		config.retryStrategy =
 		    std::make_shared<Aws::Client::StandardRetryStrategy>(static_cast<long>(glue_max_retries + 1));
 	}
-	// Null unless glue_max_retries is set: the client would create the default strategy itself
+	// Null unless glue_max_retries is set: the configuration leaves it to the client, which creates it this way
 	if (!config.retryStrategy) {
-		config.retryStrategy = Aws::Client::InitRetryStrategy();
+		config.retryStrategy = config.configFactories.retryStrategyCreateFn();
 	}
 	config.retryStrategy = std::make_shared<GlueLoggingRetryStrategy>(std::move(config.retryStrategy));
 
