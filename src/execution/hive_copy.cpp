@@ -79,11 +79,11 @@ static void ClearLocation(ClientContext &context, GlueSchemaEntry &schema, const
 GlueHiveCopy::GlueHiveCopy(PhysicalPlan &physical_plan, vector<LogicalType> types, CopyFunction function,
                            unique_ptr<FunctionData> bind_data, idx_t estimated_cardinality, GlueCatalog &catalog_p,
                            optional_ptr<GlueSchemaEntry> schema_p, unique_ptr<BoundCreateTableInfo> info_p,
-                           GlueTableInfo table_info_p, string write_id_p, string location_p)
+                           GlueTableInfo table_info_p, const string &write_id_p)
     : PhysicalCopyToFile(physical_plan, std::move(types), std::move(function), std::move(bind_data),
                          estimated_cardinality),
       catalog(catalog_p), schema(schema_p), info(std::move(info_p)), table_info(std::move(table_info_p)),
-      write_id(std::move(write_id_p)), location(std::move(location_p)) {
+      write_id(write_id_p) {
 	D_ASSERT((schema != nullptr) == (info != nullptr));
 }
 
@@ -92,6 +92,8 @@ unique_ptr<GlobalSinkState> GlueHiveCopy::GetGlobalSinkState(ClientContext &cont
 	auto &transaction = GlueTransaction::Get(context, catalog);
 	// keyed on the transaction, not this operator: each execution of the plan registers its write
 	if (!transaction.FindHiveWrite(write_id)) {
+		auto location = table_info.location;
+		StringUtil::RTrim(location, "/");
 		GlueHiveWrite write;
 		write.write_id = write_id;
 		write.database_name = table_info.schema_name;

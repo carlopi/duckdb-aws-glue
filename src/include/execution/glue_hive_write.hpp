@@ -26,10 +26,11 @@ struct GlueHiveWrite {
 	optional_idx created_table_time;
 	//! The statement deleted its files itself (a failed partition registration does), so the undo need not look
 	bool files_deleted = false;
-};
 
-//! Undo a write whose statement failed: delete its files and, for CREATE TABLE AS, drop the table it created. Best
-//! effort: a step that fails is logged
-void UndoHiveWrite(ClientContext &context, GlueCatalog &catalog, GlueHiveWrite &write);
+public:
+	//! Undo a write whose statement failed: delete its files and, for CREATE TABLE AS, drop the table it created.
+	//! Best effort: a step that fails is logged
+	void Undo(ClientContext &context, GlueCatalog &catalog);
+};
 
 } // namespace duckdb

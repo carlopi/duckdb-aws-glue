@@ -595,7 +595,7 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	auto &copy = planner
 	                 .Make<GlueHiveCopy>(std::move(return_types), copy_function->function, std::move(function_data),
 	                                     op.estimated_cardinality, insert.catalog, create_schema,
-	                                     std::move(create_info), table_info, write_id, location)
+	                                     std::move(create_info), table_info, write_id)
 	                 .Cast<GlueHiveCopy>();
 	// as the COPY binder does: without it every chunk becomes a batch of its own (a 2048-row parquet row group)
 	if (copy.function.desired_batch_size) {

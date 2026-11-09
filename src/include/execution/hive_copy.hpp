@@ -16,11 +16,11 @@ class GlueSchemaEntry;
 class GlueHiveCopy final : public PhysicalCopyToFile {
 public:
 	//! INSERT: no schema and info. CTAS: the schema to create in, the bound statement and the definition resolved at
-	//! planning, which the create uses as is. The files are named <write_id>_..., below 'location'.
+	//! planning, which the create uses as is. The files are named <write_id>_..., below the table's location.
 	GlueHiveCopy(PhysicalPlan &physical_plan, vector<LogicalType> types, CopyFunction function,
 	             unique_ptr<FunctionData> bind_data, idx_t estimated_cardinality, GlueCatalog &catalog,
 	             optional_ptr<GlueSchemaEntry> schema, unique_ptr<BoundCreateTableInfo> info, GlueTableInfo table_info,
-	             string write_id, string location);
+	             const string &write_id);
 
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
 	string GetName() const override;
@@ -31,7 +31,6 @@ private:
 	unique_ptr<BoundCreateTableInfo> info;
 	GlueTableInfo table_info;
 	string write_id;
-	string location;
 	mutable annotated_mutex start_lock;
 };
 

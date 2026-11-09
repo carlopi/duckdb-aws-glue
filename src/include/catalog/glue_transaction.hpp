@@ -9,7 +9,7 @@
 #include "duckdb/transaction/transaction.hpp"
 
 #include "api/glue_api.hpp"
-#include "execution/hive_write_undo.hpp"
+#include "execution/glue_hive_write.hpp"
 
 #include <functional>
 
@@ -172,7 +172,8 @@ public:
 
 	static GlueTransaction &Get(ClientContext &context, Catalog &catalog);
 
-	//! A Hive write starts: it is undone when the transaction ends before CompleteHiveWrite
+	//! A Hive write starts: it is undone when the transaction ends before CompleteHiveWrite. Writes are refused in
+	//! explicit transactions, so a transaction holds at most one
 	void AddHiveWrite(GlueHiveWrite write);
 	//! The write, or null when it was not added or has completed; the pointer stays valid until then
 	optional_ptr<GlueHiveWrite> FindHiveWrite(const string &write_id);
@@ -186,12 +187,12 @@ public:
 	shared_ptr<GlueTransactionCache> cache;
 
 private:
-	//! Undo the writes that did not complete (UndoHiveWrite); nothing is done once the connection is gone
-	void UndoHiveWrites();
+	//! Undo the write if it did not complete (GlueHiveWrite::Undo); nothing is done once the connection is gone
+	void UndoHiveWrite();
 
 	GlueTransactionState transaction_state;
-	mutex hive_writes_lock;
-	vector<unique_ptr<GlueHiveWrite>> hive_writes;
+	annotated_mutex hive_write_lock;
+	unique_ptr<GlueHiveWrite> hive_write DUCKDB_GUARDED_BY(hive_write_lock);
 };
 
 } // namespace duckdb

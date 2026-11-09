@@ -32,21 +32,18 @@ void GlueTransaction::Start() {
 void GlueTransaction::Commit() {
 	// writes are refused in explicit transactions, so a write still here at a commit is a bug, not a failed
 	// statement: its files may be in the table, so they stay
-	vector<unique_ptr<GlueHiveWrite>> writes;
+	unique_ptr<GlueHiveWrite> write;
 	{
-		lock_guard<mutex> guard(hive_writes_lock);
-		writes = std::move(hive_writes);
-		hive_writes.clear();
+		annotated_lock_guard<annotated_mutex> guard(hive_write_lock);
+		write = std::move(hive_write);
 	}
-	if (!writes.empty()) {
+	if (write) {
 		auto client_context = context.lock();
 		if (client_context) {
-			for (auto &write : writes) {
-				DUCKDB_LOG_WARNING(*client_context,
-				                   "A write into Hive table '%s.%s' had not completed when its transaction committed; "
-				                   "its files are kept",
-				                   write->database_name, write->table_name);
-			}
+			DUCKDB_LOG_WARNING(*client_context,
+			                   "A write into Hive table '%s.%s' had not completed when its transaction committed; its "
+			                   "files are kept",
+			                   write->database_name, write->table_name);
 		}
 	}
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
@@ -55,7 +52,7 @@ void GlueTransaction::Commit() {
 }
 
 void GlueTransaction::Rollback() {
-	UndoHiveWrites();
+	UndoHiveWrite();
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
 		transaction_state = GlueTransactionState::TRANSACTION_FINISHED;
 	}
@@ -66,47 +63,43 @@ GlueTransaction &GlueTransaction::Get(ClientContext &context, Catalog &catalog) 
 }
 
 void GlueTransaction::AddHiveWrite(GlueHiveWrite write) {
-	lock_guard<mutex> guard(hive_writes_lock);
-	hive_writes.push_back(make_uniq<GlueHiveWrite>(std::move(write)));
+	annotated_lock_guard<annotated_mutex> guard(hive_write_lock);
+	if (hive_write) {
+		throw InternalException("Hive write '%s' started while write '%s' of the same transaction had not completed",
+		                        write.write_id, hive_write->write_id);
+	}
+	hive_write = make_uniq<GlueHiveWrite>(std::move(write));
 }
 
 optional_ptr<GlueHiveWrite> GlueTransaction::FindHiveWrite(const string &write_id) {
-	lock_guard<mutex> guard(hive_writes_lock);
-	for (auto &write : hive_writes) {
-		if (write->write_id == write_id) {
-			return write.get();
-		}
+	annotated_lock_guard<annotated_mutex> guard(hive_write_lock);
+	if (hive_write && hive_write->write_id == write_id) {
+		return hive_write.get();
 	}
 	return nullptr;
 }
 
 void GlueTransaction::CompleteHiveWrite(const string &write_id) {
-	lock_guard<mutex> guard(hive_writes_lock);
-	for (auto it = hive_writes.begin(); it != hive_writes.end(); ++it) {
-		if ((*it)->write_id == write_id) {
-			hive_writes.erase(it);
-			return;
-		}
+	annotated_lock_guard<annotated_mutex> guard(hive_write_lock);
+	if (hive_write && hive_write->write_id == write_id) {
+		hive_write.reset();
 	}
 }
 
-void GlueTransaction::UndoHiveWrites() {
-	vector<unique_ptr<GlueHiveWrite>> writes;
+void GlueTransaction::UndoHiveWrite() {
+	unique_ptr<GlueHiveWrite> write;
 	{
-		lock_guard<mutex> guard(hive_writes_lock);
-		writes = std::move(hive_writes);
-		hive_writes.clear();
+		annotated_lock_guard<annotated_mutex> guard(hive_write_lock);
+		write = std::move(hive_write);
 	}
-	if (writes.empty()) {
+	if (!write) {
 		return;
 	}
 	auto client_context = context.lock();
 	if (!client_context) {
 		return;
 	}
-	for (auto &write : writes) {
-		UndoHiveWrite(*client_context, glue_catalog, *write);
-	}
+	write->Undo(*client_context, glue_catalog);
 }
 
 idx_t GlueTransactionCache::NextId() {
