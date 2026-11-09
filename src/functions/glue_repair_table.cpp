@@ -54,7 +54,7 @@ void ThrowIfReadWithFileCredentials(ClientContext &context, const Value &table_n
 	if (!entry || entry->type != CatalogType::TABLE_ENTRY) {
 		return;
 	}
-	if (GlueFileCredentialsCallback::Has(context, entry->Cast<GlueTable>(), target.table)) {
+	if (!GlueFileCredentialsCallback::Get(context, entry->Cast<GlueTable>()).empty()) {
 		throw NotImplementedException("glue_repair_table of Glue table '%s', which is read with file credentials, is "
 		                              "not supported",
 		                              target.TableName());

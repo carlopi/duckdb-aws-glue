@@ -19,15 +19,9 @@ optional_ptr<GlueFileCredentialsCallback> GlueFileCredentialsCallback::Find(Clie
 	return found;
 }
 
-bool GlueFileCredentialsCallback::Has(ClientContext &context, const GlueTable &table, const GlueTableInfo &table_info) {
+string GlueFileCredentialsCallback::Get(ClientContext &context, const GlueTable &table) {
 	auto found = Find(context);
-	return found && found->HasFileCredentials(context, table, table_info);
-}
-
-string GlueFileCredentialsCallback::Get(ClientContext &context, const GlueTable &table,
-                                        const GlueTableInfo &table_info) {
-	auto found = Find(context);
-	return found ? found->GetFileSecret(context, table, table_info) : string();
+	return found ? found->GetFileSecret(context, table) : string();
 }
 
 } // namespace duckdb

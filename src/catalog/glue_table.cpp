@@ -264,7 +264,7 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 			                   table_info.schema_name, table_info.name, property);
 		}
 	}
-	scan_info->file_secret = GlueFileCredentialsCallback::Get(context, *this, table_info);
+	scan_info->file_secret = GlueFileCredentialsCallback::Get(context, *this);
 	for (auto &column : GetColumns().Logical()) {
 		scan_info->names.push_back(column.Name());
 		scan_info->types.push_back(column.Type());

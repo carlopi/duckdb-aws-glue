@@ -497,7 +497,7 @@ PhysicalOperator &GlueCatalog::PlanInsert(ClientContext &context, PhysicalPlanGe
 	auto &glue_table = GetHiveTableForDML(context, op.table, "INSERT", table_info);
 	// an INSERT writes by path, without the credentials the table's scans read with
 	// TODO: support INSERT into a table with credentials, by writing its files with them
-	if (GlueFileCredentialsCallback::Has(context, glue_table, table_info)) {
+	if (!GlueFileCredentialsCallback::Get(context, glue_table).empty()) {
 		throw NotImplementedException("INSERT into Glue table '%s', which is read with file credentials, is not "
 		                              "supported",
 		                              op.table.name.GetIdentifierName());

@@ -159,17 +159,13 @@ string TableKey(const string &catalog, const string &table) {
 //! Gives the scans of the tables named with PRAGMA glue_test_credentials a secret of their transaction
 class TestGlueFileCredentials : public GlueFileCredentialsCallback {
 public:
-	bool HasFileCredentials(ClientContext &context, const GlueTable &table, const GlueTableInfo &table_info) override {
+	string GetFileSecret(ClientContext &context, const GlueTable &table) override {
 		TableCredentials config;
-		return FindTable(table, table_info, config);
-	}
-	string GetFileSecret(ClientContext &context, const GlueTable &table, const GlueTableInfo &table_info) override {
-		TableCredentials config;
-		if (!FindTable(table, table_info, config)) {
+		if (!FindTable(table, config)) {
 			return string();
 		}
 		auto state = context.registered_state->GetOrCreate<TransactionCredentials>("glue_test_credentials");
-		auto &name = state->by_table[TableKey(table.catalog.GetName().GetIdentifierName(), table_info.name)];
+		auto &name = state->by_table[TableKey(table.catalog.GetName().GetIdentifierName(), table.table_info.name)];
 		if (name.empty()) {
 			auto candidate = "glue_test_credentials_" + to_string(++secret_count);
 			auto secret = make_uniq<KeyValueSecret>(vector<string> {config.scope}, Identifier("s3"),
@@ -195,9 +191,9 @@ public:
 	atomic<idx_t> secret_count {0};
 
 private:
-	bool FindTable(const GlueTable &table, const GlueTableInfo &table_info, TableCredentials &config) {
+	bool FindTable(const GlueTable &table, TableCredentials &config) {
 		lock_guard<mutex> guard(lock);
-		auto entry = tables.find(TableKey(table.catalog.GetName().GetIdentifierName(), table_info.name));
+		auto entry = tables.find(TableKey(table.catalog.GetName().GetIdentifierName(), table.table_info.name));
 		if (entry == tables.end()) {
 			return false;
 		}
