@@ -291,7 +291,8 @@ bool IsDataFile(const OpenFileInfo &file, const string &prefix) {
 
 //! Glue tables only: a hive_scan root has no catalog, and no write through the extension clears its listing
 static bool CacheListings(ClientContext &context, const HiveScanInfo &scan_info) {
-	if (scan_info.catalog_name.empty()) {
+	// a listing kept beyond the transaction may not have been made with the secret the file secret names
+	if (scan_info.catalog_name.empty() || !scan_info.file_secret.empty()) {
 		return false;
 	}
 	Value enabled;
@@ -299,8 +300,20 @@ static bool CacheListings(ClientContext &context, const HiveScanInfo &scan_info)
 	       BooleanValue::Get(enabled);
 }
 
+//! Makes the open of 'file' read with the secret named 'file_secret', if any
+static void CarryFileSecret(OpenFileInfo &file, const string &file_secret) {
+	if (file_secret.empty()) {
+		return;
+	}
+	// a copy: the listing the file comes from shares its extended info
+	file.extended_info = file.extended_info ? make_shared_ptr<ExtendedOpenFileInfo>(*file.extended_info)
+	                                        : make_shared_ptr<ExtendedOpenFileInfo>();
+	file.extended_info->options[ExtendedOpenFileInfo::SECRET_OPTION] = Value(file_secret);
+}
+
 //! The data files below 'location', at any depth (like read_parquet on a directory)
-static void ListDataFiles(ClientContext &context, bool cached, const string &location, vector<OpenFileInfo> &files) {
+static void ListDataFiles(ClientContext &context, bool cached, const string &location, const string &file_secret,
+                          vector<OpenFileInfo> &files) {
 	auto directory = location;
 	StringUtil::RTrim(directory, "/");
 	if (directory.empty()) {
@@ -311,7 +324,8 @@ static void ListDataFiles(ClientContext &context, bool cached, const string &loc
 		if (!IsDataFile(file, prefix)) {
 			continue;
 		}
-		files.push_back(file);
+		CarryFileSecret(file, file_secret);
+		files.push_back(std::move(file));
 	}
 }
 
@@ -323,8 +337,9 @@ public:
 	    : BaseExecutorTask(executor), context(context), cached(cached), location(location), files(files) {
 	}
 
+	//! without the file secret: AddFile carries it
 	void ExecuteTask() override {
-		ListDataFiles(context, cached, location, files);
+		ListDataFiles(context, cached, location, string(), files);
 	}
 	string TaskType() const override {
 		return "ListPartitionTask";
@@ -577,6 +592,7 @@ void HiveMultiFileList::AddFile(OpenFileInfo file, idx_t partition_index) const 
 		return;
 	}
 	scan_info->file_partitions[file.path] = partition_index;
+	CarryFileSecret(file, scan_info->file_secret);
 	expanded_files.push_back(std::move(file));
 }
 
@@ -638,7 +654,7 @@ bool HiveMultiFileList::ExpandNextPath() const {
 			throw InvalidInputException("Hive table '%s' has no location", scan_info->Describe());
 		}
 		ListDataFiles(client_context, CacheListings(client_context, *scan_info), scan_info->root_location,
-		              expanded_files);
+		              scan_info->file_secret, expanded_files);
 		mode = "table";
 	} else {
 		auto partitions = scan_info->Partitions(client_context);
@@ -707,7 +723,8 @@ vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 	PlanListings();
 	vector<OpenFileInfo> files;
 	if (scan_info->partition_keys.empty()) {
-		ListDataFiles(client_context, CacheListings(client_context, *scan_info), scan_info->root_location, files);
+		ListDataFiles(client_context, CacheListings(client_context, *scan_info), scan_info->root_location,
+		              scan_info->file_secret, files);
 		return files;
 	}
 	if (listing_jobs.empty()) {
@@ -720,7 +737,7 @@ vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 	auto location = (*scan_info->Partitions(client_context))[partition_index].location;
 	StringUtil::RTrim(location, "/");
 	vector<OpenFileInfo> listed;
-	ListDataFiles(client_context, CacheListings(client_context, *scan_info), location, listed);
+	ListDataFiles(client_context, CacheListings(client_context, *scan_info), location, scan_info->file_secret, listed);
 	// as ListPartitions keeps them: not the files of a partition registered at a location nested inside this one
 	BuildPartitionLocations();
 	auto comparable_size = ComparableLocation(location).size();
@@ -792,6 +809,7 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 			    ComparableLocation((*scan_info->Partitions(client_context))[owner.GetIndex()].location) + "/";
 			in_sampled = true;
 		}
+		CarryFileSecret(file, scan_info->file_secret);
 		files.push_back(file);
 		file_partitions.push_back(owner.GetIndex());
 	}
@@ -895,6 +913,8 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 	serializer.WritePropertyWithDefault<string>(114, "catalog", info.table ? info.catalog_name : string());
 	serializer.WritePropertyWithDefault<string>(115, "database", info.table ? info.database_name : string());
 	serializer.WritePropertyWithDefault<string>(116, "table", info.table ? info.table_name : string());
+	// a name only: outside the transaction that created the secret, the open fails rather than reading by path
+	serializer.WritePropertyWithDefault<string>(117, "file_secret", info.file_secret);
 }
 
 //! The Glue table a deserialized scan was bound to, while the catalog holds it as the scan read it: the same location
@@ -969,6 +989,7 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 	auto catalog_name = deserializer.ReadPropertyWithDefault<string>(114, "catalog");
 	auto database_name = deserializer.ReadPropertyWithDefault<string>(115, "database");
 	auto table_name = deserializer.ReadPropertyWithDefault<string>(116, "table");
+	info->file_secret = deserializer.ReadPropertyWithDefault<string>(117, "file_secret");
 	if (partitions.size() != locations.size()) {
 		throw SerializationException("Hive scan of \"%s\": %d partitions but %d partition locations", info->table_name,
 		                             partitions.size(), locations.size());
@@ -1928,6 +1949,10 @@ static unique_ptr<ParsedExpression> ReaderColumn(const HiveScanInfo &info, const
 optional<HiveReaderCall> HiveScanGetReaderCall(const LogicalGet &get) {
 	auto info = BoundHiveScanInfo(get);
 	if (!info || (info->file_format == HiveFileFormat::PARQUET && HasBinaryColumn(*info))) {
+		return nullopt;
+	}
+	// a reader given the files by path would not read them with the scan's credentials
+	if (!info->file_secret.empty()) {
 		return nullopt;
 	}
 	auto &bind_data = get.bind_data->Cast<MultiFileBindData>();
