@@ -17,7 +17,7 @@ jobs:
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@ae971e03c1840a1c6c2d81b91d1ec851f297f720 # v2.0-cyanoptera 2026-11-06 pin
     with:
       ci_tools_version: ae971e03c1840a1c6c2d81b91d1ec851f297f720 # v2.0-cyanoptera 2026-11-06 pin
-      exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads;windows_amd64_rtools;windows_amd64_mingw'
+      exclude_archs: 'windows_amd64_rtools;windows_amd64_mingw'
       extension_name: glue
 
   code-quality-check:
