@@ -51,11 +51,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto &instance = loader.GetDatabaseInstance();
 	auto &config = DBConfig::GetConfig(instance);
 
-	config.AddExtensionOption("glue_network_calls_via_duckdb",
-	                          "Route the Glue API calls of the AWS SDK through DuckDB's HTTP layer (httpfs) instead "
-	                          "of the AWS SDK's own HTTP client, so they use DuckDB's proxy / certificate settings "
-	                          "and show up in the HTTP log. Default true.",
-	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	config.AddExtensionOption(
+	    "glue_network_calls_via_duckdb",
+	    "Route the Glue API calls of the AWS SDK through DuckDB's HTTP layer (httpfs) instead "
+	    "of the AWS SDK's own HTTP client, so they use DuckDB's proxy / certificate settings "
+	    "and show up in the HTTP log. Default true, and always on under WebAssembly, where the SDK "
+	    "has no HTTP client of its own.",
+	    LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
 	config.AddExtensionOption("glue_get_partitions_segments",
 	                          "How many GetPartitions requests to run at the same time when listing the partitions of "
@@ -76,12 +78,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "not write one: INSERT into it and CREATE TABLE ... AS with these options are refused. "
 	                          "Default false.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
-	config.AddExtensionOption(
-	    "experimental_glue_view_enable_external_catalogs",
-	    "Allow Glue views over tables of other kinds of catalogs, stored by the catalog's type and "
-	    "the alias it is attached under: a view reads only where a catalog of that type is "
-	    "attached under that alias. Default false.",
-	    LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	// global only: a view entry is shared by all sessions and reads it without a ClientContext
+	ExtensionOption external_catalog_types(
+	    "Types of non-Glue catalogs (e.g. ['duckdb', 'iceberg']) whose tables Glue views may store, by type and alias, "
+	    "and read; never catalogs in memory, temporary, system or hidden. Global only. Default empty.",
+	    LogicalType::LIST(LogicalType::VARCHAR), nullptr, Value::LIST(LogicalType::VARCHAR, vector<Value>()),
+	    SetScope::GLOBAL, false, false);
+	external_catalog_types.supports_session = false;
+	config.AddExtensionOption("experimental_glue_view_external_catalog_types", std::move(external_catalog_types));
 	config.AddExtensionOption("glue_metadata_cache_scope",
 	                          "How long resolved Glue metadata (tables, partitions) is reused: 'transaction' (default) "
 	                          "re-resolves per transaction, so writes from other sessions become visible between "
@@ -141,8 +145,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterGlueHttpClientFactory();
 	RegisterGlueLogTypes(instance);
 
-	// Hive tables are read with read_parquet
-	ExtensionHelper::AutoLoadExtension(instance, "parquet");
+	// Hive tables are read with read_parquet. A linked parquet is loaded as linked: autoloading would install it first
+	if (!instance.ExtensionIsLoaded("parquet")) {
+		DuckDB db(instance);
+		if (ExtensionHelper::LoadExtension(db, "parquet") != ExtensionLoadResult::LOADED_EXTENSION) {
+			ExtensionHelper::AutoLoadExtension(instance, "parquet");
+		}
+	}
 	if (!instance.ExtensionIsLoaded("parquet")) {
 		throw MissingExtensionException("The glue extension requires the parquet extension to be loaded!");
 	}
