@@ -500,11 +500,10 @@ FROM duckdb_logs_parsed('GlueScan');
 ```
 
 The `GlueRetry` log type (`WARNING`) records each retry the AWS SDK's retry strategy decides on for a Glue API call,
-before the wait, with either HTTP client: the `error` that caused it (e.g. `ThrottlingException`), its `message` and
-HTTP `status`, the `retry` number (1 for the first), `max_retries` (`glue_max_retries`, or the limit of the SDK's
-default policy), the `delay_ms` before the retry and the `request_id` of the failed attempt. `status` is NULL when the
-request got no response, `error` and `request_id` when the SDK has none (e.g. a dropped connection), and
-`max_retries` when the strategy reports no limit. A retry the SDK makes to correct clock skew does not go through the
+before the wait, with either HTTP client: the `error` that caused it (e.g. `ThrottlingException`), its HTTP `status`,
+the `retry` number (1 for the first) and the `request_id` of the failed attempt. `status` is NULL when the request got
+no response, `error` and `request_id` when the SDK has none (e.g. a dropped connection). The retry limit is
+`glue_max_retries`, or 10 by default. A retry the SDK makes to correct clock skew does not go through the
 retry strategy and is not logged.
 
 ```sql

@@ -11,8 +11,6 @@
 
 namespace duckdb {
 
-thread_local int64_t GlueLoggingRetryStrategy::last_delay_ms = 0;
-
 GlueLoggingRetryStrategy::GlueLoggingRetryStrategy(std::shared_ptr<Aws::Client::RetryStrategy> strategy_p)
     : strategy(std::move(strategy_p)) {
 }
@@ -20,22 +18,15 @@ GlueLoggingRetryStrategy::GlueLoggingRetryStrategy(std::shared_ptr<Aws::Client::
 bool GlueLoggingRetryStrategy::ShouldRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors> &error,
                                            long attempted_retries) const {
 	auto retry = strategy->ShouldRetry(error, attempted_retries);
-	auto delay_ms = last_delay_ms;
-	last_delay_ms = 0;
 	auto context = GlueHttpClientContextScope::Current();
 	if (retry && context && Logger::Get(*context).ShouldLog(GlueRetryLogType::NAME, GlueRetryLogType::LEVEL)) {
 		GlueRetryEvent event;
 		event.error = error.GetExceptionName().c_str();
-		event.message = error.GetMessage().c_str();
 		auto status = static_cast<int>(error.GetResponseCode());
 		if (status > 0) {
 			event.status = NumericCast<idx_t>(status);
 		}
 		event.retry = NumericCast<idx_t>(attempted_retries + 1);
-		if (strategy->GetMaxAttempts() > 0) {
-			event.max_retries = NumericCast<idx_t>(strategy->GetMaxAttempts() - 1);
-		}
-		event.delay_ms = NumericCast<idx_t>(MaxValue<int64_t>(delay_ms, 0));
 		event.request_id = error.GetRequestId().c_str();
 		DUCKDB_LOG(*context, GlueRetryLogType, event);
 	}
@@ -44,9 +35,7 @@ bool GlueLoggingRetryStrategy::ShouldRetry(const Aws::Client::AWSError<Aws::Clie
 
 long GlueLoggingRetryStrategy::CalculateDelayBeforeNextRetry(
     const Aws::Client::AWSError<Aws::Client::CoreErrors> &error, long attempted_retries) const {
-	auto delay_ms = strategy->CalculateDelayBeforeNextRetry(error, attempted_retries);
-	last_delay_ms = delay_ms;
-	return delay_ms;
+	return strategy->CalculateDelayBeforeNextRetry(error, attempted_retries);
 }
 
 long GlueLoggingRetryStrategy::GetMaxAttempts() const {

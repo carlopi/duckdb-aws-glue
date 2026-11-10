@@ -2,7 +2,6 @@
 
 #include <aws/core/client/RetryStrategy.h>
 
-#include <cstdint>
 #include <memory>
 
 namespace duckdb {
@@ -14,7 +13,6 @@ public:
 
 	bool ShouldRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors> &error,
 	                 long attempted_retries) const override;
-	//! The SDK asks for the delay before it asks whether to retry, on the thread making the call
 	long CalculateDelayBeforeNextRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors> &error,
 	                                   long attempted_retries) const override;
 	long GetMaxAttempts() const override;
@@ -27,7 +25,6 @@ public:
 
 private:
 	std::shared_ptr<Aws::Client::RetryStrategy> strategy;
-	static thread_local int64_t last_delay_ms;
 };
 
 } // namespace duckdb

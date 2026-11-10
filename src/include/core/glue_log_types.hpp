@@ -51,15 +51,11 @@ public:
 };
 
 //! A Glue API call the AWS SDK's retry strategy decided to retry, logged as GlueRetry before the wait. 'status' is NULL
-//! when the request got no response, 'max_retries' when the strategy reports no limit, 'error' and 'request_id' when
-//! the SDK has none (e.g. a dropped connection).
+//! when the request got no response, 'error' and 'request_id' when the SDK has none (e.g. a dropped connection).
 struct GlueRetryEvent {
 	string error;
-	string message;
 	optional_idx status;
 	idx_t retry = 0;
-	optional_idx max_retries;
-	idx_t delay_ms = 0;
 	string request_id;
 };
 
