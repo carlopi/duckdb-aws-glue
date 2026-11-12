@@ -67,17 +67,23 @@ SELECT a.id, b.name FROM my_datalake.default.fsg_dim a JOIN my_datalake.default.
 6	NULL
 
 # a partitioned table: the data columns get none, so that a join's filter still prunes partitions before any of their
-# files is read; the key keeps the exact statistics of its values
+# files is read; with glue_enable_partition_key_statistics the key keeps the exact statistics of its values
 statement ok
 CREATE TABLE my_datalake.default.fsg_fact (v BIGINT, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
 INSERT INTO my_datalake.default.fsg_fact SELECT i, CASE WHEN i <= 100 THEN '2024-01-01' ELSE '2024-01-02' END FROM range(1, 201) t(i);
 
+statement ok
+SET glue_enable_partition_key_statistics = true;
+
 query II
 SELECT stats(v), stats(dt) FROM my_datalake.default.fsg_fact LIMIT 1;
 ----
 {'has_no_null': true, 'has_null': true}	{'approx_unique': 2, 'has_no_null': true, 'has_null': false, 'has_unicode': false, 'max': 2024-01-02, 'max_string_length': 10, 'min': 2024-01-01, 'min_string_length': 10}
+
+statement ok
+RESET glue_enable_partition_key_statistics;
 
 query II
 SELECT count(*), sum(v) FROM my_datalake.default.fsg_fact WHERE v > 150;

@@ -526,6 +526,12 @@ unique_ptr<BaseStatistics> HivePartitionStatistics(ClientContext &context, Table
 			return nullptr;
 		}
 	}
+	// off by default: key statistics can cost a join on the key its run-time partition pruning
+	Value enabled;
+	if (!context.TryGetCurrentSetting("glue_enable_partition_key_statistics", enabled) || enabled.IsNull() ||
+	    !enabled.GetValue<bool>()) {
+		return nullptr;
+	}
 
 	// the partitions left after pruning: filter pushdown runs before statistics are asked for
 	auto partition_indexes = hive_list.PartitionIndexes();

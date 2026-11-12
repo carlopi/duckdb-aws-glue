@@ -220,7 +220,7 @@ statement ok
 RESET hive_footer_statistics_max_files;
 
 # a partitioned scan gets none: listing its partitions while planning would read them before a join's filter prunes
-# them. Its partition keys keep the statistics of the partition values
+# them. With glue_enable_partition_key_statistics its partition keys keep the statistics of the partition values
 statement ok
 COPY (SELECT i::BIGINT AS i, CASE WHEN i <= 10 THEN 'a' ELSE 'b' END AS p FROM range(1, 21) t(i))
 TO '{TEST_DIR}/fs_part' (FORMAT parquet, PARTITION_BY (p));
@@ -229,10 +229,16 @@ statement ok
 CREATE MACRO fs_part() AS TABLE FROM hive_scan('{TEST_DIR}/fs_part', schema := {i: 'BIGINT', p: 'VARCHAR'},
     partitions := [{p: 'a'}, {p: 'b'}]);
 
+statement ok
+SET glue_enable_partition_key_statistics = true;
+
 query II
 SELECT stats(i), stats(p) FROM fs_part() LIMIT 1;
 ----
 {'has_no_null': true, 'has_null': true}	{'approx_unique': 2, 'has_no_null': true, 'has_null': false, 'has_unicode': false, 'max': b, 'max_string_length': 1, 'min': a, 'min_string_length': 1}
+
+statement ok
+RESET glue_enable_partition_key_statistics;
 
 query II rowsort
 SELECT p, count(*) FROM fs_part() WHERE i > 9 GROUP BY p;
