@@ -71,6 +71,8 @@ unique_ptr<Catalog> GlueAttach::Attach(optional_ptr<StorageExtensionInfo> storag
 			attach_options.default_schema = Identifier(entry.second.ToString());
 		} else if (lower_name == "verify_connection") {
 			attach_options.verify_connection = entry.second.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>();
+		} else if (lower_name == "iceberg_catalog") {
+			attach_options.iceberg_catalog = Identifier(entry.second.ToString());
 		} else {
 			throw InvalidConfigurationException("Unrecognized option for Glue attach: '%s'", entry.first);
 		}

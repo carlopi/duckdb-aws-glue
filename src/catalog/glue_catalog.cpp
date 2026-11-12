@@ -24,6 +24,7 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
+#include "catalog/glue_view.hpp"
 #include "catalog/scan_filter_equality.hpp"
 #include "planning/glue_hive_insert.hpp"
 
@@ -340,6 +341,7 @@ CatalogEntryLookup GlueCatalog::TryLookupEntryInternal(CatalogTransaction transa
 	if (lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY) {
 		switch (TryLookupTableBeforeSchema(transaction, lookup_info, database_name, result)) {
 		case TableLookup::TABLE_FOUND:
+			return ViewForReading(transaction, result);
 		case TableLookup::TABLE_NOT_FOUND:
 		case TableLookup::SCHEMA_NOT_FOUND:
 			// 'result' holds the table and its schema, the schema alone, or neither
@@ -352,6 +354,16 @@ CatalogEntryLookup GlueCatalog::TryLookupEntryInternal(CatalogTransaction transa
 	if (schema) {
 		result.schema = &schema->Cast<SchemaCatalogEntry>();
 		result.entry = result.schema->LookupEntry(transaction, lookup_info);
+	}
+	if (lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY) {
+		return ViewForReading(transaction, result);
+	}
+	return result;
+}
+
+CatalogEntryLookup GlueCatalog::ViewForReading(CatalogTransaction transaction, CatalogEntryLookup result) {
+	if (result.entry && result.entry->type == CatalogType::VIEW_ENTRY) {
+		result.entry = &result.entry->Cast<GlueView>().ForReading(transaction.GetContext());
 	}
 	return result;
 }

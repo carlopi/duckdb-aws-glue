@@ -1,5 +1,6 @@
 #include "catalog/glue_view.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "catalog/glue_view_names.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
@@ -78,6 +79,53 @@ const SelectStatement &GlueView::GetQuery() {
 	auto &result = *copy;
 	resolved.emplace(std::move(signature), std::move(copy));
 	return result;
+}
+
+CatalogEntry &GlueView::ForReading(ClientContext &context) {
+	auto &glue_catalog = catalog.Cast<GlueCatalog>();
+	if (!IsSupported() || glue_catalog.options.iceberg_catalog.empty()) {
+		return *this;
+	}
+	auto &transaction = GlueTransaction::Get(context, catalog);
+	auto existing = transaction.iceberg_views.find(*this);
+	if (existing != transaction.iceberg_views.end()) {
+		return *existing->second;
+	}
+	unique_ptr<SelectStatement> query;
+	try {
+		query = unique_ptr_cast<SQLStatement, SelectStatement>(GetQuery().Copy());
+	} catch (std::exception &) {
+		// binding the view reports the error
+		return *this;
+	}
+	auto view_name = table_info.schema_name + "." + table_info.name;
+	if (!GlueViewNames::MapIcebergTables(context, glue_catalog, view_name, *query->node)) {
+		return *this;
+	}
+	auto info = GetInfo();
+	auto &view_info = info->Cast<CreateViewInfo>();
+	view_info.query = std::move(query);
+	auto view = make_uniq<ViewCatalogEntry>(catalog, schema, view_info);
+	auto &result = *view;
+	transaction.iceberg_views.emplace(*this, std::move(view));
+	return result;
+}
+
+void GlueView::BindView(ClientContext &context, BindViewAction action) {
+	if (action == BindViewAction::BIND_IF_UNBOUND && GetColumnInfo()) {
+		return;
+	}
+	auto &reading = ForReading(context);
+	if (&reading == this) {
+		ViewCatalogEntry::BindView(context, action);
+		return;
+	}
+	auto &view = reading.Cast<ViewCatalogEntry>();
+	view.BindView(context, action);
+	auto columns = view.GetColumnInfo();
+	if (columns) {
+		UpdateBinding(columns->types, columns->names);
+	}
 }
 
 string GlueView::ToSQL() const {

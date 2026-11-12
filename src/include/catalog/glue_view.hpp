@@ -19,6 +19,9 @@ public:
 
 public:
 	const SelectStatement &GetQuery() override;
+	//! The view as this transaction reads it: Iceberg tables from the catalog ICEBERG_CATALOG names
+	CatalogEntry &ForReading(ClientContext &context);
+	void BindView(ClientContext &context, BindViewAction action = BindViewAction::BIND_IF_UNBOUND) override;
 	unique_ptr<CatalogEntry> Copy(ClientContext &context) const override;
 	//! The stored text, without parsing it
 	string ToSQL() const override;

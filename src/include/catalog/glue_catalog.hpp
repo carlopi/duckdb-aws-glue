@@ -130,6 +130,8 @@ private:
 	//! Looks the table up before its schema; with SKIPPED the regular lookup runs instead
 	TableLookup TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
 	                                       const string &database_name, CatalogEntryLookup &result);
+	//! A Glue view found by a table lookup is read with its Iceberg tables mapped (GlueView::ForReading)
+	CatalogEntryLookup ViewForReading(CatalogTransaction transaction, CatalogEntryLookup result);
 
 private:
 	//! for reading - the fetched catalog id or account id from ATTACH
