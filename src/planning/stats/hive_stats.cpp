@@ -367,15 +367,16 @@ static optional_idx FooterRowGroupRows(ClientContext &context, const MultiFileBi
 //! The scan's bind data with every file's footer read by DuckDB's multi-file reader (maximum_files_for_stats), once
 //! per scan and only when planning asks: at bind a DESCRIBE would read them. Null for a partitioned or non-parquet
 //! scan, one of more files than the bound, or a footer that could not be read
-static optional_ptr<const MultiFileBindData> ReadFooters(ClientContext &context, const MultiFileBindData &bind_data,
-                                                         const HiveScanInfo &info) {
+static shared_ptr<const FunctionData> ReadFooters(ClientContext &context, const MultiFileBindData &bind_data,
+                                                  const HiveScanInfo &info) {
 	// a partitioned scan's listing would read its partitions before a join's filter prunes them
 	if (info.file_format != HiveFileFormat::PARQUET || !info.partition_keys.empty()) {
 		return nullptr;
 	}
-	annotated_lock_guard<annotated_mutex> guard(info.footers_lock);
-	if (!info.footers_read) {
-		info.footers_read = true;
+	auto entry = HiveQueryCache::Get(context)->GetScanFooters(info);
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	if (!entry->read) {
+		entry->read = true;
 		auto max_files = FooterStatisticsMaxFiles(context);
 		if (max_files > 0) {
 			try {
@@ -386,7 +387,7 @@ static optional_ptr<const MultiFileBindData> ReadFooters(ClientContext &context,
 				footer_data.file_options.maximum_files_for_stats = max_files;
 				footer_data.interface->ReadFilesForStatistics(context, footer_data);
 				if (!footer_data.union_readers.empty()) {
-					info.footers = std::move(footers);
+					entry->footers = shared_ptr<const FunctionData>(std::move(footers));
 				}
 			} catch (std::exception &ex) {
 				ErrorData error(ex);
@@ -399,10 +400,7 @@ static optional_ptr<const MultiFileBindData> ReadFooters(ClientContext &context,
 			}
 		}
 	}
-	if (!info.footers) {
-		return nullptr;
-	}
-	return &info.footers->Cast<MultiFileBindData>();
+	return entry->footers;
 }
 
 //! Cardinality of a Hive scan: the files listed for the table, measured once per query, scaled to the partitions
@@ -418,7 +416,7 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 		return make_uniq<NodeStatistics>(0);
 	}
 	auto footers = ReadFooters(context, bind_data, info);
-	auto footer_rows = footers ? FooterRowGroupRows(context, *footers) : optional_idx();
+	auto footer_rows = footers ? FooterRowGroupRows(context, footers->Cast<MultiFileBindData>()) : optional_idx();
 	if (footer_rows.IsValid()) {
 		// counted rather than estimated, so it is also the max, as a table scan reports its count
 		return make_uniq<NodeStatistics>(footer_rows.GetIndex(), footer_rows.GetIndex());
