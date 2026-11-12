@@ -13,6 +13,13 @@ optional_idx ListedFileSize(const OpenFileInfo &file);
 
 class BaseStatistics;
 
+//! The default and the largest value of hive_footer_statistics_max_files
+constexpr idx_t HIVE_FOOTER_STATISTICS_DEFAULT_MAX_FILES = 16;
+constexpr idx_t HIVE_FOOTER_STATISTICS_MAX_FILES_LIMIT = 25;
+
+//! The maximum_files_for_stats an unpartitioned parquet scan binds with
+idx_t HiveFooterStatisticsMaxFiles(ClientContext &context);
+
 //! Cardinality of a Hive scan: the files listed for the table, measured once per query, scaled to the partitions read
 unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const FunctionData *bind_data_p);
 //! Partition columns are answered from the partition values, every other column by the format's own function

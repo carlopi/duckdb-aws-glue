@@ -635,12 +635,12 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 }
 
 bool HiveMultiFileList::ExpandNextPath() const {
-	// called with the list's lock held; runs one listing per call, and a failed listing is retried by the next call
+	// called with the list's lock held; runs one listing per call
 	PlanListings();
 	if (next_job >= listing_jobs.size()) {
 		return false;
 	}
-	auto &job = listing_jobs[next_job];
+	auto &job = listing_jobs[next_job++];
 	GlueScanEvent event(scan_info->Describe(), scan_info->scan_id, "listing");
 	auto files_before = expanded_files.size();
 	string mode;
@@ -664,7 +664,6 @@ bool HiveMultiFileList::ExpandNextPath() const {
 			mode = "partition";
 		}
 	}
-	next_job++;
 	if (!scan_info->partition_keys.empty()) {
 		event.partitions_read = job.partitions.size();
 	}
@@ -1097,6 +1096,10 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		param_map["binary_as_string"] = Value::BOOLEAN(!HasBinaryColumn(*scan_info));
 		// writers leave NaN out of a float column's min/max, so without a nan_count the bounds do not cover NaN
 		param_map["can_have_nan"] = Value::BOOLEAN(true);
+		// a partitioned scan's listing would read its partitions before a join's filter prunes them
+		if (scan_info->partition_keys.empty()) {
+			scan_info->maximum_files_for_stats = HiveFooterStatisticsMaxFiles(context);
+		}
 		break;
 	case HiveFileFormat::CSV:
 		// Hive CSV files carry no schema: the columns are given, by position, and the dialect is the one the table
@@ -1274,6 +1277,7 @@ void HiveMultiFileReader::BindOptions(MultiFileOptions &options, MultiFileList &
 	options.auto_detect_hive_partitioning = false;
 	options.hive_partitioning = false;
 	options.union_by_name = false;
+	options.maximum_files_for_stats = ScanInfo().maximum_files_for_stats;
 	MultiFileReader::BindOptions(options, files, return_types, names, bind_data);
 }
 

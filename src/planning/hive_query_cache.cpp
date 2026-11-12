@@ -79,7 +79,6 @@ void HiveQueryCache::QueryEnd(ClientContext &context) {
 	annotated_lock_guard<annotated_mutex> guard(lock);
 	glue_tables.clear();
 	samples.clear();
-	file_footers.clear();
 	directory_listings.clear();
 	scan_count = 0;
 }
@@ -103,15 +102,6 @@ shared_ptr<HiveTableSampleEntry> HiveQueryCache::GetSample(const string &table) 
 	auto &entry = samples[table];
 	if (!entry) {
 		entry = make_shared_ptr<HiveTableSampleEntry>();
-	}
-	return entry;
-}
-
-shared_ptr<HiveFileFooterEntry> HiveQueryCache::GetFileFooter(const string &key) {
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	auto &entry = file_footers[key];
-	if (!entry) {
-		entry = make_shared_ptr<HiveFileFooterEntry>();
 	}
 	return entry;
 }

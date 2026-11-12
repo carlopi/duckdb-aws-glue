@@ -5,6 +5,10 @@
 #include "duckdb/common/multi_file/multi_file_data.hpp"
 #include "duckdb/common/multi_file/multi_file_function.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/function/partition_stats.hpp"
+#include "duckdb/common/operator/add.hpp"
+#include "duckdb/common/multi_file/table_function_multi_file.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value_map.hpp"
 #include "duckdb/common/unordered_map.hpp"
@@ -17,7 +21,6 @@
 #include "core/glue_types.hpp"
 #include "planning/hive_multi_file_reader.hpp"
 #include "planning/hive_query_cache.hpp"
-#include "planning/stats/hive_footer_statistics.hpp"
 
 namespace duckdb {
 
@@ -133,14 +136,30 @@ static optional_idx SampleLineOrientedRowsPerFile(ClientContext &context, const 
 }
 
 //! The rows of one data file: from the footer for parquet, from the lines of a bounded prefix for csv and json
-static optional_idx RowsInFile(ClientContext &context, const MultiFileBindData &bind_data,
-                               const HiveMultiFileList &list, const OpenFileInfo &file) {
-	auto &info = list.ScanInfo();
+static optional_idx RowsInFile(ClientContext &context, const MultiFileBindData &bind_data, const HiveScanInfo &info,
+                               const OpenFileInfo &file) {
 	switch (info.file_format) {
 	case HiveFileFormat::PARQUET: {
-		// the row count is in the footer, and the format's own reader is the only thing that can read it
-		auto footer = HiveParquetFooters(context, bind_data, list).Get(file);
-		return footer ? footer->TryGetCardinalityEstimate() : optional_idx();
+		// the row count is in the footer, and the format's own reader is the only thing that can read it. Parquet is
+		// bound with no named parameters, so a reader built from default options reads the file as the scan will
+		auto options = bind_data.interface->InitializeOptions(context, nullptr);
+		// a throwaway copy of the bind data: Initialize and FinalizeBindData write the opened file's numbers into it,
+		// and the real bind data must not be rewritten behind the running scan
+		auto probe = bind_data.Copy();
+		auto &probe_data = probe->Cast<MultiFileBindData>();
+		auto reader = bind_data.multi_file_reader->CreateReader(context, file, *options, bind_data.file_options,
+		                                                        *probe_data.interface);
+		if (!reader) {
+			return optional_idx();
+		}
+		probe_data.Initialize(std::move(reader));
+		probe_data.interface->FinalizeBindData(probe_data);
+		// file_count 1 makes the format report that one file's rows rather than an extrapolation over the list
+		auto rows = probe_data.interface->GetCardinality(context, probe_data, 1);
+		if (rows && rows->has_estimated_cardinality) {
+			return rows->estimated_cardinality;
+		}
+		return optional_idx();
 	}
 	case HiveFileFormat::CSV:
 	case HiveFileFormat::JSON:
@@ -244,13 +263,10 @@ static HiveTableSample MeasureTable(ClientContext &context, const MultiFileBindD
 		}
 		auto &file = listed[measured.GetIndex()];
 		sample.file_bytes = ListedFileSize(file);
-		sample.file_rows = RowsInFile(context, bind_data, files, file);
+		sample.file_rows = RowsInFile(context, bind_data, info, file);
 	} catch (std::exception &ex) {
-		ErrorData error(ex);
-		if (error.Type() == ExceptionType::INTERRUPT) {
-			throw;
-		}
 		// costing must not fail a query: the scan reports a directory or file it cannot read
+		ErrorData error(ex);
 		DUCKDB_LOG_WARNING(context, "Could not sample Hive table '%s' for its cardinality: %s", info.Describe(),
 		                   error.RawMessage());
 	}
@@ -285,6 +301,69 @@ static shared_ptr<const HiveTableSample> SampleTable(ClientContext &context, con
 	return entry->sample;
 }
 
+idx_t HiveFooterStatisticsMaxFiles(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("hive_footer_statistics_max_files", setting) && !setting.IsNull()) {
+		// SET checks the bound; DBConfig::SetOptionByName does not
+		return MinValue<idx_t>(setting.GetValue<idx_t>(), HIVE_FOOTER_STATISTICS_MAX_FILES_LIMIT);
+	}
+	return HIVE_FOOTER_STATISTICS_DEFAULT_MAX_FILES;
+}
+
+static optional_idx RowGroupRows(ClientContext &context, const TableFunction &function, BaseUnionData &footer) {
+	auto &file_data = footer.Cast<TableFunctionUnionData>();
+	if (!function.get_partition_stats || !file_data.bind_data) {
+		return optional_idx();
+	}
+	BoundTableFunction bound_function(function);
+	GetPartitionStatsInput input(bound_function, file_data.bind_data.get());
+	auto row_groups = function.get_partition_stats(context, input);
+	if (row_groups.empty()) {
+		// none to count: only a footer that says the file is empty is believed
+		auto total = footer.TryGetCardinalityEstimate();
+		return total.IsValid() && total.GetIndex() == 0 ? optional_idx(idx_t(0)) : optional_idx();
+	}
+	idx_t rows = 0;
+	for (auto &row_group : row_groups) {
+		if (row_group.count_type != CountType::COUNT_EXACT || !TryAddOperator::Operation(rows, row_group.count, rows)) {
+			return optional_idx();
+		}
+	}
+	return rows;
+}
+
+//! The rows of the row groups of every file, from the footers read at bind (maximum_files_for_stats)
+static optional_idx FooterRowGroupRows(ClientContext &context, const MultiFileBindData &bind_data) {
+	auto &footers = bind_data.union_readers;
+	if (footers.empty() || footers.size() != bind_data.file_list->GetTotalFileCount()) {
+		return optional_idx();
+	}
+	auto wrapper = dynamic_cast<const TableFunctionMultiFileWrapper *>(bind_data.interface.get());
+	if (!wrapper) {
+		return optional_idx();
+	}
+	idx_t rows = 0;
+	for (auto &footer : footers) {
+		optional_idx file_rows;
+		try {
+			// the row groups are what the scan reads, which the footer's own total may not match
+			file_rows = RowGroupRows(context, wrapper->function, *footer);
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			if (error.Type() == ExceptionType::INTERRUPT) {
+				throw;
+			}
+			// costing must not fail a query: the scan reports a file it cannot read
+			DUCKDB_LOG_WARNING(context, "Could not count the row groups of '%s': %s", footer->GetFileName(),
+			                   error.RawMessage());
+		}
+		if (!file_rows.IsValid() || !TryAddOperator::Operation(rows, file_rows.GetIndex(), rows)) {
+			return optional_idx();
+		}
+	}
+	return rows;
+}
+
 //! Cardinality of a Hive scan: the files listed for the table, measured once per query, scaled to the partitions
 //! this scan reads. Replaces a constant: without it a 40-row dimension table and a 200,000-row fact table cost the
 //! same, and csv and json are estimated at one row.
@@ -298,7 +377,7 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 		return make_uniq<NodeStatistics>(0);
 	}
 	if (info.file_format == HiveFileFormat::PARQUET) {
-		auto rows = HiveParquetFooters(context, bind_data, hive_list).Rows();
+		auto rows = FooterRowGroupRows(context, bind_data);
 		if (rows.IsValid()) {
 			// counted rather than estimated, so it is also the max, as a table scan reports its count
 			return make_uniq<NodeStatistics>(rows.GetIndex(), rows.GetIndex());
@@ -372,7 +451,7 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 //===--------------------------------------------------------------------===//
 //! Statistics for a partition column, from the values of the partitions the scan will read. We get the
 //! complete set of values the column takes and can derive min/max, the distinct count and has-null.
-//! Any other column gets its files' merged footer statistics (HiveParquetFooters), else the format's own.
+//! Columns that are not partition keys are left to the format's own function.
 unique_ptr<BaseStatistics> HivePartitionStatistics(ClientContext &context, TableFunctionGetStatisticsInput &input) {
 	auto &bind_data = input.bind_data->Cast<MultiFileBindData>();
 	auto &hive_list = bind_data.file_list->Cast<HiveMultiFileList>();
@@ -387,18 +466,22 @@ unique_ptr<BaseStatistics> HivePartitionStatistics(ClientContext &context, Table
 		}
 	}
 	if (key_index == DConstants::INVALID_INDEX) {
-		// a data column, a struct field or a virtual column
-		auto &column_index = input.column_index;
-		if (info.file_format == HiveFileFormat::PARQUET && column_index.HasPrimaryIndex() &&
-		    !column_index.HasChildren() && !column_index.IsVirtualColumn() &&
-		    column_index.GetPrimaryIndex() < bind_data.columns.size()) {
-			auto statistics = HiveParquetFooters(context, bind_data, hive_list)
-			                      .Statistics(bind_data.columns[column_index.GetPrimaryIndex()]);
-			if (statistics) {
-				return statistics;
-			}
+		// a data column, a struct field or a virtual column: the format merges the footers read at bind
+		if (!info.format_statistics) {
+			return nullptr;
 		}
-		return info.format_statistics ? info.format_statistics(context, input) : nullptr;
+		try {
+			return info.format_statistics(context, input);
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			if (error.Type() == ExceptionType::INTERRUPT) {
+				throw;
+			}
+			// costing must not fail a query: the scan reports a file it cannot read
+			DUCKDB_LOG_WARNING(context, "Could not read the statistics of a column of Hive table '%s': %s",
+			                   info.Describe(), error.RawMessage());
+			return nullptr;
+		}
 	}
 
 	// the partitions left after pruning: filter pushdown runs before statistics are asked for

@@ -8,7 +8,6 @@
 #include "core/glue_info.hpp"
 
 namespace duckdb {
-class BaseUnionData;
 struct HiveScanInfo;
 struct HiveTableSample;
 
@@ -27,14 +26,6 @@ struct HiveTableSampleEntry {
 	shared_ptr<const HiveTableSample> sample DUCKDB_GUARDED_BY(lock);
 };
 
-//! The footer of a parquet file planning read: a table's sampled file, or any file of a small unpartitioned table
-struct HiveFileFooterEntry {
-	annotated_mutex lock;
-	bool read DUCKDB_GUARDED_BY(lock) = false;
-	//! Null when the footer could not be read
-	shared_ptr<BaseUnionData> footer DUCKDB_GUARDED_BY(lock);
-};
-
 //! A directory's recursive listing, fetched a page at a time as it is read
 struct HiveDirectoryListingEntry {
 	annotated_mutex lock;
@@ -44,7 +35,7 @@ struct HiveDirectoryListingEntry {
 
 //! What the running query learned about the tables it scans, dropped when the query ends: the partitions of a table
 //! (asked for once however often the query scans it), the recursive listings of directories (shared by the estimate and
-//! every scan listing the same directory), the table samples and the parquet footers planning read
+//! every scan listing the same directory) and the table samples
 class HiveQueryCache : public ClientContextState {
 public:
 	static shared_ptr<HiveQueryCache> Get(ClientContext &context);
@@ -57,8 +48,6 @@ public:
 	shared_ptr<GlueTableEntry> GetGlueTable(const string &key);
 	//! 'table' identifies the table: its catalog and name, or the location of a hive_scan
 	shared_ptr<HiveTableSampleEntry> GetSample(const string &table);
-	//! 'key' identifies the file and the reader options it is read with
-	shared_ptr<HiveFileFooterEntry> GetFileFooter(const string &key);
 	//! The recursive listing of 'directory', fetched page by page as it is read. With 'cache_in_connection' the
 	//! listing is kept beyond the query (glue_cache_listings)
 	shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory,
@@ -70,7 +59,6 @@ private:
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<GlueTableEntry>> glue_tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<HiveTableSampleEntry>> samples DUCKDB_GUARDED_BY(lock);
-	unordered_map<string, shared_ptr<HiveFileFooterEntry>> file_footers DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<HiveDirectoryListingEntry>> directory_listings DUCKDB_GUARDED_BY(lock);
 	idx_t scan_count DUCKDB_GUARDED_BY(lock) = 0;
 };

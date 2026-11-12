@@ -159,9 +159,9 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   can get it wrong, and the scan reads the row groups.
 - A partition key's statistics are exact: the minimum, maximum and number of values of the partitions a scan reads.
   A data column of an unpartitioned parquet table of at most `hive_footer_statistics_max_files` (default 16) files
-  gets its minimum, maximum and NULLs merged from the footers of all of them, read at the same time while planning
-  (the scan reads each again when it opens the file), with the scan's reader options and shared with the row count;
-  `0` turns them and the count off. A column gets none when a footer cannot be read, or when some file with rows
+  gets its minimum, maximum and NULLs merged from the footers of all of them, which DuckDB's multi-file reader reads
+  at the same time when the scan binds (its `maximum_files_for_stats`), with the scan's reader options; the row count
+  and the scan reuse them. `0` turns them and the count off. A column gets none when a footer cannot be read, or when some file with rows
   lacks the column, stores it as another type than the table declares, or has statistics for it that DuckDB cannot
   read; so do the data columns of partitioned, csv, json and avro tables. An empty file is skipped. The optimizer
   prunes on these statistics and orders joins by them: the minimum and maximum of a dimension's key let it see how

@@ -12,7 +12,7 @@
 #include "functions/glue_functions.hpp"
 #include "functions/glue_repair_table.hpp"
 #include "grammar/glue_grammar.hpp"
-#include "planning/stats/hive_footer_statistics.hpp"
+#include "planning/stats/hive_stats.hpp"
 #include "api/glue_api.hpp"
 #include "api/glue_http_client.hpp"
 #include "core/glue_log_types.hpp"
