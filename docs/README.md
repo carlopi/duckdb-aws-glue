@@ -584,7 +584,9 @@ The local config also sets `GLUE_FAULT_ENDPOINT`: `scripts/glue_fault_proxy.py` 
 GetTables on a database named `fault_access_denied*` / `fault_invalid_input*` with that Glue error, and carries out
 CreateDatabase / CreateTable on a `fault_already_exists*` database before answering AlreadyExistsException (what it
 creates differs from what was asked for), and refuses the first attempt of each request on a `fault_throttled*`
-database with ThrottlingException, letting the SDK's retries through; tests that need it are skipped without it. It
+database with ThrottlingException, letting the SDK's retries through. A table named `fault_denied_*` is one the caller
+may not describe, as Lake Formation leaves it: GetTable on it fails with AccessDeniedException and GetTables leaves it
+out. Tests that need the proxy are skipped without it. It
 also sets `GLUE_LINK_PROXY_ENDPOINT`: `scripts/resource_link_proxy.py` in front of moto, which answers for the database
 `link_db` as Glue does through a database resource link whose target is `target_db`.
 
