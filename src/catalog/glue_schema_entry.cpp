@@ -1,9 +1,11 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_view.hpp"
 #include "catalog/glue_view_names.hpp"
+#include "catalog/scan_filter_equality.hpp"
 
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/catalog/dependency_list.hpp"
+#include "duckdb/catalog/entry_scan_filters.hpp"
 #include "duckdb/parser/parsed_data/comment_on_column_info.hpp"
 #include "duckdb/parser/parsed_data/alter_info.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
@@ -23,6 +25,7 @@
 
 #include "core/glue_types.hpp"
 #include "duckdb/common/error_data.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "catalog/glue_view.hpp"
@@ -84,19 +87,30 @@ bool GlueSchemaEntry::IsBucketingOption(const string &key) {
 	       StringUtil::CIEquals(key, "SortColumns");
 }
 
+static string LookupSpelling(const case_insensitive_map_t<string> &spellings, const string &key) {
+	auto entry = spellings.find(key);
+	return entry == spellings.end() ? string() : entry->second;
+}
+
 //! The Glue option another spelling of a bucketing option stands for, empty if the key is none of them
 static string BucketingOptionFor(const string &key) {
-	static const pair<const char *, const char *> SPELLINGS[] = {
+	static const case_insensitive_map_t<string> SPELLINGS = {
 	    {"bucket_columns", "BucketColumns"}, {"bucketed_by", "BucketColumns"},
 	    {"clustered_by", "BucketColumns"},   {"number_of_buckets", "NumberOfBuckets"},
 	    {"bucket_count", "NumberOfBuckets"}, {"sort_columns", "SortColumns"},
 	    {"sorted_by", "SortColumns"}};
-	for (auto &spelling : SPELLINGS) {
-		if (StringUtil::CIEquals(key, spelling.first)) {
-			return spelling.second;
-		}
-	}
-	return string();
+	return LookupSpelling(SPELLINGS, key);
+}
+
+//! The spelling to use for another engine's CREATE TABLE option, empty if the key is none of them
+static string OtherEngineOptionFor(const string &key) {
+	static constexpr const char *PARTITIONED_BY_CLAUSE = "a PARTITIONED BY (...) clause";
+	static const case_insensitive_map_t<string> SPELLINGS = {
+	    {"partitioned_by", PARTITIONED_BY_CLAUSE},  {"partitioning", PARTITIONED_BY_CLAUSE},
+	    {"partition_by", PARTITIONED_BY_CLAUSE},    {"partition_columns", PARTITIONED_BY_CLAUSE},
+	    {"partition_keys", PARTITIONED_BY_CLAUSE},  {"PartitionKeys", PARTITIONED_BY_CLAUSE},
+	    {"external_location", "option 'location'"}, {"field_delimiter", "option 'delimiter'"}};
+	return LookupSpelling(SPELLINGS, key);
 }
 
 static void CheckBucketedTablesEnabled(ClientContext &context, const string &key) {
@@ -307,6 +321,8 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 			// stored as a table parameter this would silently leave the table unbucketed
 			throw BinderException("Unknown CREATE TABLE option '%s', a bucketed Glue table is created with option '%s'",
 			                      key, BucketingOptionFor(key));
+		} else if (!OtherEngineOptionFor(key).empty()) {
+			throw BinderException("Unknown CREATE TABLE option '%s', use %s instead", key, OtherEngineOptionFor(key));
 		} else {
 			// everything else is a table property, stored in Glue's table parameters (like Hive / Trino do)
 			result.parameters[key] = string_value;
@@ -582,7 +598,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	auto check = unique_ptr_cast<SQLStatement, SelectStatement>(expanded->Copy());
 	auto aliases = GlueViewNames::AttachedAliases(glue_catalog, GlueViewNames::ReferencedCatalogIds(*check->node));
 	GlueViewNames::ResolveForReading(glue_catalog, database_info.name + "." + view_name, aliases, *check->node);
-	GlueViewNames::PinToCatalog(*check->node, catalog.GetName());
+	GlueViewNames::PinToCatalog(*check->node, catalog.GetName(), name);
 	vector<LogicalType> types;
 	vector<Identifier> names;
 	// the entries the query reads in this catalog, through other views too: the view being replaced is among them
@@ -1039,6 +1055,33 @@ void GlueSchemaEntry::Scan(ClientContext &context, CatalogType type,
 
 void GlueSchemaEntry::Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) {
 	throw NotImplementedException("Scan without context not supported for Glue databases");
+}
+
+void GlueSchemaEntry::Scan(ClientContext &context, SchemaScanInfo &info) {
+	string name;
+	if (!CatalogTypeIsSupported(info.type) || !info.filter || info.filter->GetOid() ||
+	    !TryGetNameEquality(info.filter->GetName(), "GlueSchemaEntry::Scan", name)) {
+		SchemaCatalogEntry::Scan(context, info);
+		return;
+	}
+	// tables and views share the set, so the lookup returns whichever Glue holds under the name; the caller keeps
+	// the entries of the type it asked for
+	EntryLookupInfo lookup(info.type, QualifiedName(Identifier(name)));
+	optional_ptr<CatalogEntry> entry;
+	try {
+		entry = tables.GetEntry(context, lookup);
+	} catch (const GlueException &ex) {
+		// like the listing this filter replaces, a table we may not describe is not listed
+		if (!ex.access_denied) {
+			throw;
+		}
+		ErrorData error(ex);
+		DUCKDB_LOG_WARNING(context, "Not listing Glue table '%s.%s': %s", database_info.name, name, error.RawMessage());
+		return;
+	}
+	if (entry) {
+		info.callback(*entry);
+	}
 }
 
 const GlueDatabaseInfo &GlueSchemaEntry::GetSchemaInfo(ClientContext &context) {

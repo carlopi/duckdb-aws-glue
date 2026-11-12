@@ -11,10 +11,6 @@
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
-#include "duckdb/planner/expression/bound_comparison_expression.hpp"
-#include "duckdb/planner/expression/bound_constant_expression.hpp"
-#include "duckdb/planner/expression/bound_function_expression.hpp"
-#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/storage/database_size.hpp"
 
@@ -24,9 +20,11 @@
 #include "duckdb/planner/operator/logical_update.hpp"
 
 #include "api/glue_api.hpp"
+#include "catalog/glue_file_credentials.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
+#include "catalog/scan_filter_equality.hpp"
 #include "planning/glue_hive_insert.hpp"
 
 namespace duckdb {
@@ -277,52 +275,11 @@ void GlueCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaC
 	schemas.Scan(context, [&](CatalogEntry &schema) { callback(schema.Cast<GlueSchemaEntry>()); });
 }
 
-//! Whether the expression is the schema_name column itself, or lower() of it
-static bool IsSchemaNameOperand(const Expression &expr) {
-	if (ExpressionFilter::IsSimpleFilterColumnRef(expr)) {
-		return true;
-	}
-	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
-		return false;
-	}
-	auto &function = expr.Cast<BoundFunctionExpression>();
-	return function.Function().GetName() == "lower" && function.GetChildren().size() == 1 &&
-	       ExpressionFilter::IsSimpleFilterColumnRef(*function.GetChildren()[0]);
-}
-
-//! Extracts the name from a `schema_name = 'x'` or `lower(schema_name) = 'x'` filter. Glue stores database names
-//! lowercased, so a single lookup of 'x' finds every database either shape can accept.
-static bool TryGetSchemaNameEquality(optional_ptr<const TableFilter> filter, string &name) {
-	if (!filter) {
-		return false;
-	}
-	auto &expr = *ExpressionFilter::GetExpressionFilter(*filter, "GlueCatalog::GetSchemasForScan").expr;
-	if (!BoundComparisonExpression::IsComparison(expr) || expr.GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
-		return false;
-	}
-	auto &comparison = expr.Cast<BoundFunctionExpression>();
-	auto &left = BoundComparisonExpression::Left(comparison);
-	auto &right = BoundComparisonExpression::Right(comparison);
-	optional_ptr<const Expression> constant;
-	if (IsSchemaNameOperand(left) && right.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-		constant = right;
-	} else if (IsSchemaNameOperand(right) && left.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-		constant = left;
-	} else {
-		return false;
-	}
-	auto &value = constant->Cast<BoundConstantExpression>().GetValue();
-	if (value.IsNull() || value.type().id() != LogicalTypeId::VARCHAR) {
-		return false;
-	}
-	name = StringValue::Get(value);
-	return true;
-}
-
 vector<reference<SchemaCatalogEntry>> GlueCatalog::GetSchemasForScan(ClientContext &context,
                                                                      const SchemaScanFilters &filters) {
 	string name;
-	if (filters.GetSchemaOid() || !TryGetSchemaNameEquality(filters.GetSchemaName(), name)) {
+	if (filters.GetSchemaOid() ||
+	    !TryGetNameEquality(filters.GetSchemaName(), "GlueCatalog::GetSchemasForScan", name)) {
 		return Catalog::GetSchemasForScan(context, filters);
 	}
 	vector<reference<SchemaCatalogEntry>> result;
@@ -538,6 +495,13 @@ PhysicalOperator &GlueCatalog::PlanInsert(ClientContext &context, PhysicalPlanGe
 	ThrowIfInExplicitTransaction(context);
 	GlueTableInfo table_info;
 	auto &glue_table = GetHiveTableForDML(context, op.table, "INSERT", table_info);
+	// an INSERT writes by path, without the credentials the table's scans read with
+	// TODO: support INSERT into a table with credentials, by writing its files with them
+	if (!GlueFileCredentialsCallback::Get(context, glue_table).empty()) {
+		throw NotImplementedException("INSERT into Glue table '%s', which is read with file credentials, is not "
+		                              "supported",
+		                              op.table.name.GetIdentifierName());
+	}
 	return GlueHiveInsert::PlanInsert(context, planner, op, glue_table, table_info, plan);
 }
 
