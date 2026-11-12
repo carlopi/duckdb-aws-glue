@@ -34,7 +34,9 @@ statement ok
 CREATE TABLE my_datalake.glue_iceberg_views.customers AS SELECT 1 AS id, 'Ada' AS name;
 
 statement ok
-CREATE TABLE my_datalake_iceberg.glue_iceberg_views.orders AS SELECT 1 AS id, 42 AS amount;
+CREATE TABLE my_datalake_iceberg.glue_iceberg_views.orders
+WITH ('location' = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/iceberg_orders')
+AS SELECT 1 AS id, 42 AS amount;
 
 statement ok
 CREATE VIEW my_datalake.glue_iceberg_views.orders_by_customer AS
