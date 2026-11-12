@@ -129,6 +129,7 @@ public:
 		view.parameters = {{"duckdb_view", "true"}, {"duckdb_view_default_database", "sales"}};
 		view.view_original_text = sql;
 		view.view_expanded_text = sql;
+		view.version_id = "1";
 		tables.push_back(std::move(view));
 	}
 
@@ -277,4 +278,69 @@ TEST_CASE("Without ICEBERG_CATALOG a Glue view does not read Iceberg tables", "[
 	REQUIRE_THROWS_WITH(fixture.Store("SELECT * FROM lake_ice.sales.orders"),
 	                    Catch::Contains("experimental_glue_view_external_catalog_types"));
 	Run(con, "COMMIT");
+}
+
+TEST_CASE("ICEBERG_CATALOG can not name the Glue catalog itself", "[glue_view_iceberg]") {
+	IcebergViewFixture fixture;
+	auto result = fixture.con->Query("ATTACH '123456789012' AS lake2 (TYPE GLUE, SECRET view_test, REGION 'us-east-1', "
+	                                 "ENDPOINT 'http://127.0.0.1:1', VERIFY_CONNECTION false, "
+	                                 "ICEBERG_CATALOG 'LAKE2')");
+	REQUIRE(result->HasError());
+	REQUIRE(StringUtil::Contains(result->GetError(), "not the Glue catalog \"lake2\" itself"));
+}
+
+TEST_CASE("A Glue view binds the Iceberg schema of the current transaction", "[glue_view_iceberg]") {
+	IcebergViewFixture fixture;
+	auto &con = *fixture.con;
+	auto bind_columns = [&]() {
+		Run(con, "BEGIN");
+		auto &catalog = Catalog::GetCatalog(*con.context, Identifier("lake")).Cast<GlueCatalog>();
+		auto schema = catalog.GetSchemas().GetEntry(*con.context, "sales");
+		EntryLookupInfo lookup(CatalogType::VIEW_ENTRY, QualifiedName(Identifier("orders_by_customer")));
+		auto entry =
+		    schema->Cast<SchemaCatalogEntry>().LookupEntry(catalog.GetCatalogTransaction(*con.context), lookup);
+		auto &view = entry->Cast<ViewCatalogEntry>();
+		view.BindView(*con.context);
+		auto type = view.GetColumnInfo()->types[1];
+		Run(con, "COMMIT");
+		return type;
+	};
+	REQUIRE(bind_columns() == LogicalType::INTEGER);
+	Run(con, "CREATE OR REPLACE TABLE lake_ice.sales.orders AS SELECT 1 AS id, 42::BIGINT AS amount");
+	REQUIRE(bind_columns() == LogicalType::BIGINT);
+	auto result = Run(con, "SELECT amount FROM lake.sales.orders_by_customer");
+	REQUIRE(result->GetTypes()[0] == LogicalType::BIGINT);
+}
+
+TEST_CASE("A Glue view follows a reattached ICEBERG_CATALOG within a transaction", "[glue_view_iceberg]") {
+	IcebergViewFixture fixture;
+	auto &con = *fixture.con;
+	Run(con, "BEGIN");
+	Run(con, "SELECT * FROM lake.sales.orders_by_customer");
+	Run(con, "DETACH lake_ice");
+	Run(con, "ATTACH '999999999999' AS lake_ice (TYPE iceberg)");
+	auto error = ErrorOf(con, "SELECT * FROM lake.sales.orders_by_customer");
+	INFO(error);
+	REQUIRE(StringUtil::Contains(error, "reads warehouse '999999999999'"));
+}
+
+TEST_CASE("A Glue view checks experimental_glue_view_external_catalog_types on every read", "[glue_view_iceberg]") {
+	IcebergViewFixture fixture;
+	auto &con = *fixture.con;
+	{
+		DuckDB seed(fixture.directory + "/ext.duckdb");
+		Connection seed_con(seed);
+		Run(seed_con, "CREATE TABLE t AS SELECT 7 AS x");
+	}
+	Run(con, "ATTACH " + Quote(fixture.directory + "/ext.duckdb") + " AS ext");
+	fixture.AddView("external_view", "SELECT o.amount, e.x FROM sales.orders o, \"external:duckdb:ext\".main.t e");
+	fixture.Warm();
+	Run(con, "SET GLOBAL experimental_glue_view_external_catalog_types = ['duckdb']");
+	Run(con, "BEGIN");
+	auto result = Run(con, "SELECT * FROM lake.sales.external_view")->Fetch();
+	REQUIRE(result->GetValue(1, 0).ToString() == "7");
+	Run(con, "RESET GLOBAL experimental_glue_view_external_catalog_types");
+	auto error = ErrorOf(con, "SELECT * FROM lake.sales.external_view");
+	INFO(error);
+	REQUIRE(StringUtil::Contains(error, "experimental_glue_view_external_catalog_types"));
 }

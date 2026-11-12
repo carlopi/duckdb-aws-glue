@@ -48,6 +48,10 @@ public:
 	string select_sql;
 
 private:
+	//! GetQuery(), with the alias mapping the copy was resolved for (empty when the view reads only its own catalog)
+	const SelectStatement &ResolveQuery(string &signature);
+
+private:
 	bool is_duckdb_view;
 	//! Empty when the view can be queried, else why not (decided when the entry is built, before any parse)
 	string unsupported_reason;

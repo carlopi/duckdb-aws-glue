@@ -78,6 +78,12 @@ unique_ptr<Catalog> GlueAttach::Attach(optional_ptr<StorageExtensionInfo> storag
 		}
 	}
 
+	if (!attach_options.iceberg_catalog.empty() &&
+	    StringUtil::CIEquals(attach_options.iceberg_catalog.GetIdentifierName(), name)) {
+		throw InvalidConfigurationException(
+		    "ICEBERG_CATALOG must name an Iceberg catalog, not the Glue catalog \"%s\" itself", name);
+	}
+
 	// The region defaults to the region of the storage secret (an error is thrown if there is no secret)
 	auto secret_entry = GlueCatalog::GetStorageSecret(context, attach_options.secret_name);
 	if (attach_options.region.empty()) {
