@@ -301,7 +301,7 @@ static shared_ptr<const HiveTableSample> SampleTable(ClientContext &context, con
 	return entry->sample;
 }
 
-idx_t HiveFooterStatisticsMaxFiles(ClientContext &context) {
+static idx_t FooterStatisticsMaxFiles(ClientContext &context) {
 	Value setting;
 	if (context.TryGetCurrentSetting("hive_footer_statistics_max_files", setting) && !setting.IsNull()) {
 		// SET checks the bound; DBConfig::SetOptionByName does not
@@ -332,7 +332,7 @@ static optional_idx RowGroupRows(ClientContext &context, const TableFunction &fu
 	return rows;
 }
 
-//! The rows of the row groups of every file, from the footers read at bind (maximum_files_for_stats)
+//! The rows of the row groups of every file, from the footers ReadFooters read
 static optional_idx FooterRowGroupRows(ClientContext &context, const MultiFileBindData &bind_data) {
 	auto &footers = bind_data.union_readers;
 	if (footers.empty() || footers.size() != bind_data.file_list->GetTotalFileCount()) {
@@ -364,6 +364,47 @@ static optional_idx FooterRowGroupRows(ClientContext &context, const MultiFileBi
 	return rows;
 }
 
+//! The scan's bind data with every file's footer read by DuckDB's multi-file reader (maximum_files_for_stats), once
+//! per scan and only when planning asks: at bind a DESCRIBE would read them. Null for a partitioned or non-parquet
+//! scan, one of more files than the bound, or a footer that could not be read
+static optional_ptr<const MultiFileBindData> ReadFooters(ClientContext &context, const MultiFileBindData &bind_data,
+                                                         const HiveScanInfo &info) {
+	// a partitioned scan's listing would read its partitions before a join's filter prunes them
+	if (info.file_format != HiveFileFormat::PARQUET || !info.partition_keys.empty()) {
+		return nullptr;
+	}
+	annotated_lock_guard<annotated_mutex> guard(info.footers_lock);
+	if (!info.footers_read) {
+		info.footers_read = true;
+		auto max_files = FooterStatisticsMaxFiles(context);
+		if (max_files > 0) {
+			try {
+				auto footers = bind_data.Copy();
+				auto &footer_data = footers->Cast<MultiFileBindData>();
+				// the scan's own list, which it reads anyway, rather than a copy listed again
+				footer_data.file_list = bind_data.file_list;
+				footer_data.file_options.maximum_files_for_stats = max_files;
+				footer_data.interface->ReadFilesForStatistics(context, footer_data);
+				if (!footer_data.union_readers.empty()) {
+					info.footers = std::move(footers);
+				}
+			} catch (std::exception &ex) {
+				ErrorData error(ex);
+				if (error.Type() == ExceptionType::INTERRUPT) {
+					throw;
+				}
+				// costing must not fail a query: the scan reports a directory or file it cannot read
+				DUCKDB_LOG_WARNING(context, "Could not read the footers of Hive table '%s': %s", info.Describe(),
+				                   error.RawMessage());
+			}
+		}
+	}
+	if (!info.footers) {
+		return nullptr;
+	}
+	return &info.footers->Cast<MultiFileBindData>();
+}
+
 //! Cardinality of a Hive scan: the files listed for the table, measured once per query, scaled to the partitions
 //! this scan reads. Replaces a constant: without it a 40-row dimension table and a 200,000-row fact table cost the
 //! same, and csv and json are estimated at one row.
@@ -376,12 +417,11 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 	if (partitions == 0) {
 		return make_uniq<NodeStatistics>(0);
 	}
-	if (info.file_format == HiveFileFormat::PARQUET) {
-		auto rows = FooterRowGroupRows(context, bind_data);
-		if (rows.IsValid()) {
-			// counted rather than estimated, so it is also the max, as a table scan reports its count
-			return make_uniq<NodeStatistics>(rows.GetIndex(), rows.GetIndex());
-		}
+	auto footers = ReadFooters(context, bind_data, info);
+	auto footer_rows = footers ? FooterRowGroupRows(context, *footers) : optional_idx();
+	if (footer_rows.IsValid()) {
+		// counted rather than estimated, so it is also the max, as a table scan reports its count
+		return make_uniq<NodeStatistics>(footer_rows.GetIndex(), footer_rows.GetIndex());
 	}
 	auto sample_ptr = SampleTable(context, bind_data, hive_list);
 	auto &sample = *sample_ptr;
@@ -466,12 +506,17 @@ unique_ptr<BaseStatistics> HivePartitionStatistics(ClientContext &context, Table
 		}
 	}
 	if (key_index == DConstants::INVALID_INDEX) {
-		// a data column, a struct field or a virtual column: the format merges the footers read at bind
+		// a data column, a struct field or a virtual column: the format merges the footers ReadFooters read
 		if (!info.format_statistics) {
 			return nullptr;
 		}
 		try {
-			return info.format_statistics(context, input);
+			auto footers = ReadFooters(context, bind_data, info);
+			if (!footers) {
+				return info.format_statistics(context, input);
+			}
+			TableFunctionGetStatisticsInput footer_input(footers.get(), input.column_index);
+			return info.format_statistics(context, footer_input);
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
 			if (error.Type() == ExceptionType::INTERRUPT) {

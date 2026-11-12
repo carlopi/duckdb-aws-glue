@@ -157,15 +157,15 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   row groups in the footers of all its files add up to an exact count, which the scan also reports as its maximum,
   as a DuckDB table does (the optimizer drops a `LIMIT` larger than it). A footer's own total is not used: a writer
   can get it wrong, and the scan reads the row groups.
-- A partition key's statistics are exact: the minimum, maximum and number of values of the partitions a scan reads.
-  A data column of an unpartitioned parquet table of at most `hive_footer_statistics_max_files` (default 16) files
-  gets its minimum, maximum and NULLs merged from the footers of all of them, which DuckDB's multi-file reader reads
-  at the same time when the scan binds (its `maximum_files_for_stats`), with the scan's reader options; the row count
-  and the scan reuse them. `0` turns them and the count off. A column gets none when a footer cannot be read, or when some file with rows
-  lacks the column, stores it as another type than the table declares, or has statistics for it that DuckDB cannot
-  read; so do the data columns of partitioned, csv, json and avro tables. An empty file is skipped. The optimizer
-  prunes on these statistics and orders joins by them: the minimum and maximum of a dimension's key let it see how
-  much a join on that key keeps.
+- A partition key's statistics are exact: the minimum, maximum and number of values of the partitions a scan reads. A
+  data column of an unpartitioned parquet table of at most `hive_footer_statistics_max_files` (default 16) files gets
+  its minimum, maximum and NULLs merged from the footers of all of them, which DuckDB's multi-file reader reads at the
+  same time (its `maximum_files_for_stats`), with the scan's reader options, when planning first asks for a statistic,
+  not when the scan binds: a `DESCRIBE` reads none. `0` turns them and the count off. A column gets none when a footer
+  cannot be read, or when some file with rows lacks the column, stores it as another type than the table declares, or
+  has statistics for it that DuckDB cannot read; so do the data columns of partitioned, csv, json and avro tables. An
+  empty file is skipped. The optimizer prunes on these statistics and orders joins by them: the minimum and maximum of
+  a dimension's key let it see how much a join on that key keeps.
 - The Glue table definition and the partition list are fetched once per query and table, however often the
   query scans the table.
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched

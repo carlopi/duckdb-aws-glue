@@ -57,9 +57,11 @@ struct HiveScanInfo : public TableFunctionInfo {
 	table_function_pushdown_complex_filter_t format_pushdown_complex_filter = nullptr;
 	//! The named parameters BindHiveScan bound the file format reader with, which read any of the data files
 	named_argument_map_t reader_parameters;
-	//! The maximum_files_for_stats the scan binds with: an unpartitioned parquet scan of at most this many files opens
-	//! them all at bind for their row counts and merged column statistics
-	idx_t maximum_files_for_stats = 0;
+	//! A copy of the scan's bind data that opened every file for its footer (maximum_files_for_stats). Read when
+	//! planning first asks for statistics rather than at bind, so a DESCRIBE reads none; null when not read
+	mutable annotated_mutex footers_lock;
+	mutable bool footers_read DUCKDB_GUARDED_BY(footers_lock) = false;
+	mutable unique_ptr<FunctionData> footers DUCKDB_GUARDED_BY(footers_lock);
 
 	//! The index of a partition key by name, or DConstants::INVALID_INDEX
 	idx_t GetPartitionKeyIndex(const string &name) const;

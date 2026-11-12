@@ -78,7 +78,7 @@ GROUP BY ALL ORDER BY operation;
 AWSGlue.GetPartitions	OK_200	true
 AWSGlue.GetTable	OK_200	true
 
-# a small unpartitioned parquet table is counted from the footers its scan reads at bind: neither scan samples it
+# a small unpartitioned parquet table is counted from the footers its scan reads while planning: neither scan samples it
 statement ok
 CALL truncate_duckdb_logs();
 
