@@ -3,7 +3,6 @@
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/unordered_map.hpp"
-#include "duckdb/function/function.hpp"
 #include "duckdb/main/client_context_state.hpp"
 
 #include "core/glue_info.hpp"
@@ -25,15 +24,6 @@ struct HiveTableSampleEntry {
 	//! Null until the first scan of the table measures it. Shared and immutable once set: every scan of the table in
 	//! the query (self joins, subqueries, a CTE inlined twice) reads the one sample, after the lock is released
 	shared_ptr<const HiveTableSample> sample DUCKDB_GUARDED_BY(lock);
-};
-
-//! The footers of the files of one scan, read once per query when planning first asks for statistics
-struct HiveScanFootersEntry {
-	annotated_mutex lock;
-	bool read DUCKDB_GUARDED_BY(lock) = false;
-	//! A copy of the scan's bind data that opened every file for its footer (maximum_files_for_stats); null when not
-	//! read. It holds the scan's HiveScanInfo, so it is kept here rather than in the HiveScanInfo
-	shared_ptr<const FunctionData> footers DUCKDB_GUARDED_BY(lock);
 };
 
 //! A directory's recursive listing, fetched a page at a time as it is read
@@ -58,8 +48,6 @@ public:
 	shared_ptr<GlueTableEntry> GetGlueTable(const string &key);
 	//! 'table' identifies the table: its catalog and name, or the location of a hive_scan
 	shared_ptr<HiveTableSampleEntry> GetSample(const string &table);
-	//! The footers of the scan of 'info'
-	shared_ptr<HiveScanFootersEntry> GetScanFooters(const HiveScanInfo &info);
 	//! The recursive listing of 'directory', fetched page by page as it is read. With 'cache_in_connection' the
 	//! listing is kept beyond the query (glue_cache_listings)
 	shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory,
@@ -72,8 +60,6 @@ private:
 	unordered_map<string, shared_ptr<GlueTableEntry>> glue_tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<HiveTableSampleEntry>> samples DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<HiveDirectoryListingEntry>> directory_listings DUCKDB_GUARDED_BY(lock);
-	//! By address: an entry's footers keep its HiveScanInfo alive, so the address is not reused while it is here
-	unordered_map<const HiveScanInfo *, shared_ptr<HiveScanFootersEntry>> scan_footers DUCKDB_GUARDED_BY(lock);
 	idx_t scan_count DUCKDB_GUARDED_BY(lock) = 0;
 };
 

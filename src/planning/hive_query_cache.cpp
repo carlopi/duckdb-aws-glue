@@ -76,17 +76,11 @@ string HiveQueryCache::TableKey(const string &catalog, const string &database, c
 }
 
 void HiveQueryCache::QueryEnd(ClientContext &context) {
-	unordered_map<const HiveScanInfo *, shared_ptr<HiveScanFootersEntry>> footers;
-	{
-		annotated_lock_guard<annotated_mutex> guard(lock);
-		glue_tables.clear();
-		samples.clear();
-		directory_listings.clear();
-		footers.swap(scan_footers);
-		scan_count = 0;
-	}
-	// destroyed outside the lock: they may hold the last reference to a scan and its file list
-	footers.clear();
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	glue_tables.clear();
+	samples.clear();
+	directory_listings.clear();
+	scan_count = 0;
 }
 
 idx_t HiveQueryCache::NextScanId() {
@@ -108,15 +102,6 @@ shared_ptr<HiveTableSampleEntry> HiveQueryCache::GetSample(const string &table) 
 	auto &entry = samples[table];
 	if (!entry) {
 		entry = make_shared_ptr<HiveTableSampleEntry>();
-	}
-	return entry;
-}
-
-shared_ptr<HiveScanFootersEntry> HiveQueryCache::GetScanFooters(const HiveScanInfo &info) {
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	auto &entry = scan_footers[&info];
-	if (!entry) {
-		entry = make_shared_ptr<HiveScanFootersEntry>();
 	}
 	return entry;
 }

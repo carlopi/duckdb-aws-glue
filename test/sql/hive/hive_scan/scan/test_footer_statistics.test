@@ -1,5 +1,5 @@
 # name: test/sql/hive/hive_scan/scan/test_footer_statistics.test
-# description: A parquet scan of at most hive_footer_statistics_max_files files gives each data column the statistics of its files' footers, merged over all of them, and none when a footer can not say what the scan reads; its row count is the exact sum of the footers'
+# description: A parquet scan of at most hive_footer_statistics_max_files files gives each data column the statistics of its files' footers, merged over all of them, and none when a footer can not say what the scan reads; its row count is the sum of the footers'
 # group: [scan]
 
 require parquet
@@ -146,8 +146,8 @@ SELECT count(*) FROM hive_scan('{TEST_DIR}/fs_case', schema := {id: 'BIGINT'}) W
 ----
 1
 
-# the row counts of the footers add up to the scan's exact count, which is also its max, so a LIMIT above it is
-# dropped. 1 row in one file and 3 in the other, which the sample (the largest file's rows times the files) puts at 6
+# the row counts of the footers add up to the scan's estimate. 1 row in one file and 3 in the other, which the
+# sample (the largest file's rows times the files) puts at 6
 statement ok
 COPY (SELECT i::BIGINT AS i, i <= 1 AS first FROM range(1, 5) t(i))
 TO '{TEST_DIR}/fs_uneven' (FORMAT parquet, PARTITION_BY (first));
@@ -160,16 +160,6 @@ EXPLAIN SELECT i FROM fs_uneven();
 ----
 physical_plan	<REGEX>:.*Hive Scan.*~4 rows.*
 
-query II
-EXPLAIN SELECT i FROM fs_uneven() LIMIT 100;
-----
-physical_plan	<!REGEX>:.*Limit.*
-
-query II
-EXPLAIN SELECT i FROM fs_uneven() LIMIT 3;
-----
-physical_plan	<REGEX>:.*Limit: 3.*
-
 query I
 SELECT count(*) FROM (SELECT i FROM fs_uneven() LIMIT 100);
 ----
@@ -180,29 +170,7 @@ SELECT count(*) FROM (SELECT i FROM fs_uneven() LIMIT 3);
 ----
 3
 
-# the count is of the row groups the scan reads, not the footer's own total: this footer (DuckDB's parquet-testing)
-# says 1 row while its row group holds 5, so a LIMIT of 2 stays, and one of 6 is dropped with all 5 rows read
-query II
-EXPLAIN SELECT i FROM hive_scan('test/data/parquet_footer_row_count_mismatch', schema := {i: 'BIGINT'});
-----
-physical_plan	<REGEX>:.*Hive Scan.*~5 rows.*
-
-query I
-SELECT count(*) FROM (SELECT i FROM hive_scan('test/data/parquet_footer_row_count_mismatch', schema := {i: 'BIGINT'}) LIMIT 2);
-----
-2
-
-query II
-EXPLAIN SELECT i FROM hive_scan('test/data/parquet_footer_row_count_mismatch', schema := {i: 'BIGINT'}) LIMIT 6;
-----
-physical_plan	<!REGEX>:.*Limit.*
-
-query I
-SELECT count(*) FROM (SELECT i FROM hive_scan('test/data/parquet_footer_row_count_mismatch', schema := {i: 'BIGINT'}) LIMIT 6);
-----
-5
-
-# over the bound the count is the sample's estimate, with no max
+# over the bound the count is the sample's estimate
 statement ok
 SET hive_footer_statistics_max_files = 1;
 
@@ -210,11 +178,6 @@ query II
 EXPLAIN SELECT i FROM fs_uneven();
 ----
 physical_plan	<REGEX>:.*Hive Scan.*~6 rows.*
-
-query II
-EXPLAIN SELECT i FROM fs_uneven() LIMIT 100;
-----
-physical_plan	<REGEX>:.*Limit: 100.*
 
 statement ok
 RESET hive_footer_statistics_max_files;
@@ -279,12 +242,12 @@ SELECT i FROM hive_scan('{TEST_DIR}/fs_unreadable', schema := {i: 'BIGINT'});
 ----
 <REGEX>:.*No magic bytes found at end of file.*garbage\.parquet.*
 
-# statistics DuckDB rejects (a column chunk of 0 values in a row group of 8 rows, from DuckDB's parquet-testing) give
-# the column none, and planning goes on: the scan reports the file
-query II
+# statistics DuckDB rejects (a column chunk of 0 values in a row group of 8 rows, from DuckDB's parquet-testing) fail
+# planning, as for read_parquet of the file
+statement error
 EXPLAIN SELECT x FROM hive_scan('test/data/parquet_column_num_values_mismatch', schema := {x: 'INTEGER'});
 ----
-physical_plan	<REGEX>:.*Hive Scan.*
+<REGEX>:.*metadata is corrupt. Column has 0 values but row group has 8 rows.*
 
 statement error
 SELECT x FROM hive_scan('test/data/parquet_column_num_values_mismatch', schema := {x: 'INTEGER'});

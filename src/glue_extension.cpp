@@ -133,9 +133,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	config.AddExtensionOption("hive_footer_statistics_max_files",
 	                          "An unpartitioned parquet scan that reads at most this many files gives the optimizer "
-	                          "its exact row count and each column's min, max and NULLs, from the footers of all of "
-	                          "them; a scan of more files gives an estimate and no column statistics. 0 turns it "
-	                          "off. Default 16, at most 25.",
+	                          "its row count and each column's min, max and NULLs, from the footers of all of them, "
+	                          "which it reads at bind; a scan of more files gives a sampled estimate and no column "
+	                          "statistics. 0 turns it off. Default 16, at most 25.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(HIVE_FOOTER_STATISTICS_DEFAULT_MAX_FILES),
 	                          SetHiveFooterStatisticsMaxFiles);
 
