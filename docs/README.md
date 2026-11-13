@@ -153,11 +153,22 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   parquet footer, or the lines of a 64 KiB prefix for csv and json. Every scan of the table in the query scales
   that one measurement by the files and bytes of the partitions it reads: those the listing holds completely
   count with their own size, the others with the average of those. A scan that lists the same directory reuses
-  the listing. Avro tables are not measured, so planning them lists nothing.
+  the listing. Avro tables are not measured, so planning them lists nothing. An unpartitioned parquet table of at
+  most `hive_footer_statistics_max_files` (default 16, at most 25) files is counted instead: its row count is the
+  sum of the row counts in the footers of all its files.
 - Partition keys have no optimizer statistics by default, as for `read_parquet` with hive partitioning. With
   `SET glue_enable_partition_key_statistics = true` they get the bounds and exact distinct count of the partitions a
   scan reads: the group estimate on a key is exact, but the optimizer can then push aggregates below a join on the
   key and lose that join's run-time partition pruning.
+- A data column of an unpartitioned parquet table of at most `hive_footer_statistics_max_files` (default 16) files
+  gets its minimum, maximum and NULLs merged from the footers of all of them, which DuckDB's parquet reader reads
+  when the scan binds (its `maximum_files_for_stats`), so a `DESCRIBE` of such a table lists the table and reads its
+  footers too. `0` turns them and the count off. A column gets none when a footer cannot be read, or when some file
+  with rows lacks the column, stores it as another type than the table declares, or, in a table of several files,
+  has statistics for it that DuckDB cannot read; so do the data columns of partitioned, csv, json and avro tables. A
+  table of one file whose statistics DuckDB cannot read fails planning, as `read_parquet` of that file does. An empty
+  file is skipped. The optimizer prunes on these statistics and orders joins by them: the minimum and maximum of a
+  dimension's key let it see how much a join on that key keeps.
 - The Glue table definition and the partition list are fetched once per query and table, however often the
   query scans the table.
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
